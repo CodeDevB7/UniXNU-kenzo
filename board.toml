@@ -1,0 +1,38 @@
+schema_version = 2
+
+[board]
+example = false
+name = "kenzo"
+soc = "MSM8956"
+soc_source = "msm8956"
+os_profile = "ipados-17.7.11-21H461"
+description = "Xiaomi Redmi Note 3 (Kenzo) Snapdragon 650"
+kit = "kenzo"
+
+[components]
+include = ["ArmDTPlatform", "ArmCpu", "SoftwareAES", "XnuPrelink", "DarwinBoot"]
+
+[kernel]
+defconfig = "kenzo_defconfig"
+config_fragments = ["arch:configs/common.config", "soc:configs/msm8956.config"]
+patch_series = ["arch:patches/xnu/series", "soc:patches/xnu/series"]
+
+[device_tree]
+source = "device:dts/kenzo.dts"
+include_dirs = ["soc:dts"]
+
+[firmware]
+config = "kenzo"
+dsc = "Platforms/Xiaomi/kenzoPkg/kenzo.dsc"
+fd = "Build/kenzoPkg/{target}_CLANGPDB/FV/SILICIUM_UEFI.fd"
+packages = ["{uefi}", "{tree}/package", "{tree}/drivers/DarwinBoot", "{edk2}"]
+
+[firmware.defines]
+DEVICE_MODEL = "kenzo"
+
+[payload]
+volume = "KENZO"
+size_mib = 192
+loader = "firmware"
+title = "UniXNU"
+kernel_args = ["-v", "serial=3"]

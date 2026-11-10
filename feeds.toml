@@ -1,0 +1,5 @@
+[[source]]
+name = "msm8956"
+kind = "soc"
+git = "https://github.com/CodeDevB7/UniXNU-msm8956-common"
+commit = "c9652aca1fe3c530ef79f5dae584dd85e61b1f8c"
