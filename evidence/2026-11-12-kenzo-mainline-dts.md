@@ -7,7 +7,7 @@
 
 - Archived postmarketOS merge request !5389 adds `device-xiaomi-kenzo` and a Linux 6.11 kernel package. The MR was draft and reports occasional boot hangs, so it is an engineering reference, not a stable board validation.
 - Its kernel package pins `msm8956-mainline/linux` commit `372bdae91dfec7bfb361b53250fc5716c87131be` and names the DTS `qcom/msm8956-xiaomi-kenzo`.
-- The pinned DTS identifies the phone as `Xiaomi Redmi Note 3 Pro`, compatible `xiaomi,kenzo`, `qcom,msm8956`, with MSM8956 v1.1 and MTP board selector cells (`qcom,msm-id = <0x10a 0x10001>`, `qcom,board-id = <8 0>`).
+- The pinned DTS identifies the phone as `Xiaomi Redmi Note 3 Pro`, compatible `xiaomi,kenzo`, `qcom,msm8956`, with MSM8956 v1.1 and MTP board selector cells (`qcom,msm-id = <0x10a 0x10001>`, `qcom,board-id = <8 0>`). A later live capture from the connected Kenzo reports revision 0 (`qcom,msm-id = <0x10a 0>`) with the same MTP board selector; the draft's v1.1 selector must not be assumed for this device.
 
 ## Useful board facts from that reference
 
@@ -18,7 +18,7 @@
 
 ## Assessment and next work
 
-This source gives a concrete device-specific Linux hardware inventory to compare against the minimal UniXNU DTS and can guide future peripheral research. It does not establish the complete DRAM bank layout, firmware carveouts, bootloader-selected DTB, UEFI service handoff, or a viable Kenzo UEFI launch path. Keep the existing memory range and firmware placeholders provisional until a Kenzo-matched stock DTB and measured boot handoff are available.
+This source gives a concrete device-specific Linux hardware inventory to compare against the minimal UniXNU DTS and can guide future peripheral research. The live device capture now establishes the current Android kernel's populated FDT selector and memory window, but not the complete UEFI carveouts, UEFI service handoff, or a viable Kenzo UEFI launch path. The draft DTS's v1.1 selector differs from the connected device's live revision 0 tree.
 
 ## Sources
 

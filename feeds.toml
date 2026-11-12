@@ -2,4 +2,4 @@
 name = "msm8956"
 kind = "soc"
 git = "https://github.com/CodeDevB7/UniXNU-msm8956-common"
-commit = "894aea231e7ac7133b2947777b2dbc89bdd4c6aa"
+commit = "d6845aea8fc3e5c14993b269fcca92927e85fb45"

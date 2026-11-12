@@ -1,0 +1,74 @@
+name: Kenzo DTS and ADT build
+
+on:
+  push:
+    paths:
+      - "dts/**"
+      - "feeds.toml"
+      - "board.toml"
+      - "profiles/os/**"
+      - ".github/workflows/dts-adt.yml"
+  pull_request:
+    paths:
+      - "dts/**"
+      - "feeds.toml"
+      - "board.toml"
+      - "profiles/os/**"
+      - ".github/workflows/dts-adt.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-adt:
+    runs-on: macos-26
+    steps:
+      - name: Check out UniXNU tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: UniXNU/UniXNU
+          ref: c34f018aafd6befd5dc93c05a8dccd5bdce6724b
+          path: UniXNU
+
+      - name: Check out Kenzo device source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: device
+
+      - name: Check out pinned MSM8956 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: CodeDevB7/UniXNU-msm8956-common
+          ref: d6845aea8fc3e5c14993b269fcca92927e85fb45
+          path: soc
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.13"
+
+      - name: Install device-tree compiler
+        run: brew install dtc
+
+      - name: Compile Kenzo DTB and generate ADT
+        working-directory: UniXNU
+        run: |
+          set -euo pipefail
+          dtc -I dts -O dtb -i ../soc/dts -o "$RUNNER_TEMP/kenzo-hardware.dtb" ../device/dts/kenzo.dts
+          python3 scripts/make-adt.py \
+            --dtb "$RUNNER_TEMP/kenzo-hardware.dtb" \
+            --os-profile profiles/os/ipados-17.7.11-21H461/profile.toml \
+            --board ../device/board.toml \
+            --output "$RUNNER_TEMP/kenzo.adt"
+          ls -lh "$RUNNER_TEMP/kenzo-hardware.dtb" "$RUNNER_TEMP/kenzo.adt"
+
+      - name: Upload generated ADT
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: kenzo-adt-ipados-17.7.11-21H461
+          path: ${{ runner.temp }}/kenzo.adt
+          if-no-files-found: error
+          retention-days: 30
