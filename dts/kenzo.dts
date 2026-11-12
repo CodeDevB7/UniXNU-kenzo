@@ -1,5 +1,5 @@
 /dts-v1/;
-#include "msm8956.dtsi"
+/include/ "msm8956.dtsi"
 
 / {
     model = "Xiaomi Redmi Note 3 (kenzo)";
