@@ -13,7 +13,7 @@
 
 ## Assessment
 
-The observed boot chain contains the expected Qualcomm MSM8952/MSM8956 Kenzo LK images, and the TrustZone release string is identifiable. The normal `fastboot boot` path appears unavailable in the observed aboot image. The exact SBL1, aboot, and HYP vendor releases remain unknown; the hashes are recorded so the bytes can be matched if a vendor package or known-good source becomes available. No Kenzo UEFI implementation or supported alternative first-stage launch path has been established.
+The observed boot chain contains Qualcomm MSM8952/MSM8956 Kenzo LK images, and the TrustZone release string is identifiable. The aboot binary has a string saying `fastboot boot command is not available`, but the user reports repeatedly booting `boot.img` and `recovery.img` with `fastboot boot` on this device. Treat the string as conditional or unused until the path is understood; the user's report is the evidence of actual availability. Its use for a UEFI-compatible image still needs a recorded image format and result. The exact SBL1, aboot, and HYP vendor releases remain unknown; hashes are recorded so the bytes can be matched to a package. No Kenzo UEFI implementation has been established.
 
 ## Reproduction
 
