@@ -14,11 +14,11 @@ paths = ["board.toml", "feeds.toml", "configs/**", "evidence/**", "unixnu.lock",
 inputs = ["Xiaomi Redmi Note 3, codename kenzo; Qualcomm MSM8956; selected profile ipados-17.7.11-21H461.", "Shared SoC feed points to CodeDevB7/UniXNU-msm8956-common at c9652aca1fe3c530ef79f5dae584dd85e61b1f8c."]
 configuration = ["board.toml selects ArmDTPlatform, ArmCpu, SoftwareAES, XnuPrelink and DarwinBoot; kenzo_defconfig; SoC and OS config fragments; ordered arch, SoC, OS and device patch series.", "[package] unixnu is ../UniXNU and [package.defconfig] maps ipados-17.7.11-21H461 to kenzo_defconfig."]
 procedure = ["Resolve board configuration from the UniXNU checkout with unixnu status -D UniXNU-kenzo.", "Run scripts/package.sh --check --os ipados-17.7.11-21H461 from the device repository after required local sources are available."]
-findings = ["The current repository uses format 2 and the shared SoC feed; the older handoff's build workflow description predates the current package interface.", "The package script previously stopped immediately because [package].unixnu was absent; after recording the path and profile-to-defconfig mapping, host preflight resolved kenzo_defconfig and all 59 patches."]
+findings = ["The current repository uses format 2 and the shared SoC feed; the older handoff's build workflow description predates the current package interface.", "The package script previously stopped immediately because [package].unixnu was absent; after recording the path and profile-to-defconfig mapping, host preflight resolved kenzo_defconfig and all 59 patches.", "The local set of 86 extracted DTBs contains Qualcomm MSM8956 reference platforms, but no root model/compatible identifying Kenzo; these files do not validate board wiring."]
 completion = ["The pinned SoC source resolves; package preflight writes the selected configuration and patch resolution completes for the selected OS profile."]
 limits = ["Only package preflight and patch resolution are host-verified. Kernel, UEFI firmware, payload, image assembly and device boot are unverified. Firmware repository, image inputs and device seed are not configured."]
 next_action = ["Identify the Kenzo UEFI source and verify board firmware paths and hardware inputs before attempting firmware configuration or a complete package build."]
-evidence = [{ kind = "source", reference = "board.toml", result = "Format 2 board selection and package path/defconfig mapping." }, { kind = "source", reference = "feeds.toml", result = "Pinned MSM8956 shared SoC feed." }, { kind = "host", reference = "evidence/2026-11-12-package-check.md", command = "bash scripts/package.sh --check --os ipados-17.7.11-21H461", revision = "675602dbee807cf6b137d04413eb8c7930cee7e5", result = "Passed on WSL/Linux: wrote config for kenzo_defconfig, extracted profile IPSW inputs, resolved 59 patches. UniXNU source revision 5a00e20157f3975d155f13ced7593347f9f5bf73." }]
+evidence = [{ kind = "source", reference = "board.toml", result = "Format 2 board selection and package path/defconfig mapping." }, { kind = "source", reference = "feeds.toml", result = "Pinned MSM8956 shared SoC feed." }, { kind = "source", reference = "evidence/2026-11-12-dtb-inventory.md", result = "No Kenzo-compatible root was found among 86 extracted DTBs; only Qualcomm MSM8956 reference platform trees matched." }, { kind = "host", reference = "evidence/2026-11-12-package-check.md", command = "bash scripts/package.sh --check --os ipados-17.7.11-21H461", revision = "675602dbee807cf6b137d04413eb8c7930cee7e5", result = "Passed on WSL/Linux: wrote config for kenzo_defconfig, extracted profile IPSW inputs, resolved 59 patches. UniXNU source revision 5a00e20157f3975d155f13ced7593347f9f5bf73." }]
 
 [[area]]
 id = "firmware"
@@ -39,28 +39,28 @@ id = "cpu"
 status = "planned"
 components = []
 paths = ["package/CpuFreq*", "scripts/*armcpu*"]
-inputs = ["The local Kenzo dump reports six processors; shared SoC definition declares four Cortex-A53 and two Cortex-A72 cores; GICv2 and 19.2 MHz architectural timer are listed in the hardware notes."]
+inputs = ["The local cpuinfo reports six processors; the shared SoC definition declares four Cortex-A53 and two Cortex-A72 cores. Earlier hardware notes list GICv2 and a 19.2 MHz architectural timer.", "The local extracted DTB set contains MSM8956 MTP/CDP/QRD/simulator reference trees but no root compatible identifying Kenzo."]
 configuration = ["Record the board.toml fields, DTS properties and defconfig values used for cpu and interrupts."]
 procedure = ["Follow the cpu and interrupts stage in the porting guide and record the actual commands."]
-findings = ["CPU/GIC values in the SoC DTSI are preliminary: CPU MPIDR reg values and GIC interrupt ranges still need checking against the extracted board DTB. No XNU secondary-core or IPI bring-up has been measured."]
+findings = ["CPU/GIC values in the SoC DTSI remain preliminary: the available extracted DTBs are reference-platform trees, not a Kenzo tree. CPU MPIDR reg values and GIC interrupt ranges remain unverified for this board. No XNU secondary-core or IPI bring-up has been measured."]
 completion = ["Every enabled CPU reaches its entry checkpoint and timer/IPI handling works on each enabled CPU."]
 limits = ["Per-core MPIDR values, GIC interrupt specifiers, PSCI availability and IPI behavior have not been verified from the selected board DTB or on-device logs."]
-next_action = ["Compare all extracted Kenzo DTB variants for CPU reg, GIC distributor/CPU-interface ranges, timer and PSCI nodes; validate on hardware after a UEFI boot path exists."]
-evidence = []
+next_action = ["Obtain the matching Kenzo DTB from stock firmware, then verify CPU reg/MPIDRs, GIC distributor and CPU-interface ranges, timer and PSCI nodes; validate on hardware after a UEFI boot path exists."]
+evidence = [{ kind = "source", reference = "evidence/2026-11-12-dtb-inventory.md", result = "The extracted MSM8956 trees identify only reference platforms; they are insufficient evidence for Kenzo-specific CPU/GIC values." }]
 
 [[area]]
 id = "memory"
 status = "planned"
 components = []
 paths = ["dts/**", "package/*Smmu*", "package/*Memory*", "scripts/*smmu*", "scripts/*memory*"]
-inputs = ["The local dump reports MemTotal 1889528 kB and the current Kenzo DTS declares RAM at 0x80000000 with a 0x80000000 size."]
+inputs = ["The local dump reports MemTotal 1889528 kB and the current Kenzo DTS declares RAM at 0x80000000 with a 0x80000000 size.", "Extracted MSM8956 reference DTBs do not identify Kenzo and cannot establish this board's DRAM banks or reservations."]
 configuration = ["Record the board.toml fields, DTS properties and defconfig values used for memory and dma."]
 procedure = ["Follow the memory and dma stage in the porting guide and record the actual commands."]
 findings = ["MemTotal supports the 2 GiB board variant, but does not establish the complete physical bank or reserved regions. The earlier DTS comment mentioned a 3 GB variant while its reg entry described only 2 GiB; it now identifies the captured unit's 2 GiB range without making a claim about other variants."]
 completion = ["All handoff regions are accounted for and each enabled DMA engine accesses its allocated range with the documented cache policy."]
 limits = ["Complete DRAM banks, firmware carveouts, DMA addressability, cache policy and SMMU ownership remain unverified."]
 next_action = ["Extract /memory and /reserved-memory from the matching Kenzo DTB, then reconcile with the UEFI handoff map before setting payload memory values."]
-evidence = []
+evidence = [{ kind = "source", reference = "evidence/2026-11-12-dtb-inventory.md", result = "The local extracted set has no Kenzo-compatible root, so its Qualcomm memory nodes cannot validate this board's map." }]
 
 [[area]]
 id = "storage"
