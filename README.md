@@ -2,7 +2,7 @@
 
 Initial format 2 device port for the Xiaomi Redmi Note 3 (`kenzo`, Qualcomm MSM8956 / Snapdragon 650).
 
-The current host-verified milestone includes configuration/patch preflight and standalone DTS-to-ADT generation for iPadOS 17.7.11. Kernel compilation, UEFI firmware, payload and boot-image creation, and device boot have not been verified.
+The current host-verified milestone includes configuration/patch preflight, standalone DTS-to-ADT generation, and a successful macOS GitHub Actions kernel build for iPadOS 17.7.11. UEFI firmware, payload and boot-image creation, and device boot have not been verified.
 
 ## Check the current configuration
 
@@ -14,7 +14,7 @@ bash scripts/package.sh --check --os ipados-17.7.11-21H461
 
 The command resolves dependencies, extracts the selected profile's IPSW inputs and checks configuration and patch resolution. See [the porting record](porting.toml) and [the latest preflight evidence](evidence/2026-11-12-package-check.md) for the exact revisions and limits.
 
-To compile the kernel on GitHub Actions, run **macOS kernel build** under Actions. It uses UniXNU's reusable macOS workflow and stores redacted build logs; it does not upload kernel or IPSW artifacts.
+To compile the kernel on GitHub Actions, run **Kenzo macOS kernel build** under Actions. It builds only the kernel, uploads the `kernel.macho` artifact and stores redacted text logs. It does not upload IPSW inputs.
 
 ## Outstanding work
 
