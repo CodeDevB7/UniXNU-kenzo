@@ -1,4 +1,4 @@
-name: macOS kernel build
+name: Kenzo macOS kernel build
 
 on:
   workflow_dispatch:
@@ -6,13 +6,87 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: kenzo-kernel-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   kernel:
-    uses: UniXNU/UniXNU/.github/workflows/macos.yml@c34f018aafd6befd5dc93c05a8dccd5bdce6724b
-    with:
-      device_repository: CodeDevB7/UniXNU-kenzo
-      device_ref: main
-      defconfig: kenzo_defconfig
-      steps: kernel
-      xcode: "26.6"
-      pre_build: python3 "$DEVICE_DIR/scripts/prepare-kernel-patches.py" "$GITHUB_WORKSPACE"
+    runs-on: macos-26
+    timeout-minutes: 360
+    steps:
+      - name: Select Xcode
+        run: sudo xcode-select --switch /Applications/Xcode_26.6.app/Contents/Developer
+
+      - name: Check out UniXNU
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: UniXNU/UniXNU
+          ref: c34f018aafd6befd5dc93c05a8dccd5bdce6724b
+          path: UniXNU
+          submodules: recursive
+
+      - name: Check out Kenzo device repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: device
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.13"
+
+      - name: Install build tools
+        run: brew install llvm lld mtools dtc unifdef
+
+      - name: Configure kernel
+        working-directory: UniXNU
+        run: ./unixnu defconfig kenzo_defconfig -D ../device
+
+      - name: Build kernel
+        working-directory: UniXNU
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 ../device/scripts/prepare-kernel-patches.py .
+          set -o pipefail
+          ./unixnu build kernel -D ../device -j 4 2>&1 | tee ../kernel-build.log
+
+      - name: Redact and upload logs
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path("kernel-build.log")
+          if path.exists():
+              text = path.read_text(errors="replace")
+              text = re.sub(r"https://[^\s]+", "[REDACTED_URL]", text)
+              text = re.sub(r"(?i)(token|password|secret)=\S+", r"\1=[REDACTED]", text)
+              path.write_text(text)
+          PY
+          gh run view "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --log-failed > action-failure.log 2>&1 || true
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          path = Path("action-failure.log")
+          text = path.read_text(errors="replace") if path.exists() else ""
+          text = re.sub(r"https://[^\s]+", "[REDACTED_URL]", text)
+          text = re.sub(r"(?i)(token|password|secret)=\S+", r"\1=[REDACTED]", text)
+          path.write_text(text)
+          PY
+
+      - name: Upload redacted logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: kenzo-kernel-build-logs
+          path: |
+            kernel-build.log
+            action-failure.log
+          if-no-files-found: ignore
