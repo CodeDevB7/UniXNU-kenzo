@@ -2,7 +2,7 @@
 
 Initial format 2 device port for the Xiaomi Redmi Note 3 (`kenzo`, Qualcomm MSM8956 / Snapdragon 650).
 
-The current host-verified milestone is configuration preflight and resolution of the XNU patch series for iPadOS 17.7.11. Kernel compilation, UEFI firmware, payload and boot-image creation, and device boot have not been verified.
+The current host-verified milestone includes configuration/patch preflight and standalone DTS-to-ADT generation for iPadOS 17.7.11. Kernel compilation, UEFI firmware, payload and boot-image creation, and device boot have not been verified.
 
 ## Check the current configuration
 
