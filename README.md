@@ -18,7 +18,7 @@ To compile the kernel on GitHub Actions, run **Kenzo macOS kernel build** under 
 
 ## Outstanding work
 
-- Identify and pin a Kenzo Mu-Silicium/EDK2 firmware port; replace the provisional DSC and FD paths.
+- Research found no public Kenzo/MSM8956 Mu-Silicium/EDK2 board package. Implement one only after obtaining revision-identified Kenzo bootloader inputs and the matching DTB; the current DSC/FD paths are placeholders.
 - Verify the CPU/GIC and complete memory map against the matching Kenzo DTB and firmware handoff.
 - Complete the board component selection and ADT inputs using measured hardware values.
 - Build kernel, firmware, payload and boot image, then record hardware results individually.

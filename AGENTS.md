@@ -39,10 +39,10 @@ scripts/package.sh --os <profile> --uefi ../uefi-example
 ```
 
 The platform seed (`UNIXNU_UNIQUE_CHIP_ID`) and the firmware checkout are not in
-any repository. `.github/workflows/kernel.yml` invokes UniXNU's reusable macOS
-kernel-build workflow; it builds only the kernel and uploads redacted text logs.
-The complete package and firmware build still needs a verified Kenzo UEFI
-checkout and the required device seed.
+any repository. `.github/workflows/kernel.yml` runs a standalone macOS kernel
+build and uploads `kernel.macho` plus redacted text logs. The complete package
+and firmware build still needs a verified Kenzo UEFI checkout and the required
+device seed.
 
 For a Mu-Silicium initrd payload, include `UniXNURamDiskDxe`, DiskIoDxe and
 FAT support in the firmware DSC and FDF. Follow

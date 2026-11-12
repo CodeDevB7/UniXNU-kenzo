@@ -28,11 +28,11 @@ paths = ["proprietary-files.txt", "scripts/extract-files.py", "scripts/gen-touch
 inputs = ["Kenzo stock Android boot image and extracted device-tree data are present in the sibling kenzo-dump directory; no Kenzo Mu-Silicium/EDK2 checkout is present in this workspace."]
 configuration = ["board.toml currently names a provisional Kenzo DSC/FD path; there is no firmware image pin, preflight script or confirmed firmware output."]
 procedure = ["Follow the UniXNU UEFI integration guide, then build and inspect the device FD and boot image on a supported host."]
-findings = ["No UEFI build or physical boot evidence is recorded. The current firmware fields were adapted from a template and must be replaced with paths verified against a Kenzo firmware checkout."]
+findings = ["No UEFI build or physical boot evidence is recorded. Research found no public Kenzo/MSM8956 EDK2 or Mu-Silicium config; the closest Xiaomi `jason` and `nitrogen` configs in edk2-msm target SDM660, and their values are not transferable. `board.toml` firmware paths remain template placeholders.", "The local partition inventory names SBL1, ABL, HYP and TZ partitions but contains no revision-identified bootloader images or UEFI FD. The captured Android `/proc/iomem` and MemTotal are not a UEFI handoff map. See evidence/2026-11-12-uefi-research.md."]
 completion = ["Firmware image builds, enters UniXNU, publishes the framebuffer and preserves the documented memory reservations."]
 limits = ["UEFI source, its revision, required Mu-Silicium modules, memory reservations, framebuffer handoff and firmware build output are unknown."]
-next_action = ["Identify a maintained MSM8956/Kenzo Mu-Silicium port, inspect its DSC/FDF and board configuration, then replace provisional firmware paths and record the firmware revision."]
-evidence = []
+next_action = ["Obtain revision-identified Kenzo stock firmware/bootloader inputs and the matching Kenzo DTB; map a supported first-stage launch path, then implement a pinned Mu-Silicium board package and verify its memory/services before changing firmware paths."]
+evidence = [{ kind = "source", reference = "evidence/2026-11-12-uefi-research.md", result = "No public Kenzo/MSM8956 EDK2/Mu-Silicium board config was found; near-match SDM660 configs and the lk2nd/MSM8956 references do not provide a verified UEFI path." }]
 
 [[area]]
 id = "cpu"
