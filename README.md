@@ -14,6 +14,8 @@ bash scripts/package.sh --check --os ipados-17.7.11-21H461
 
 The command resolves dependencies, extracts the selected profile's IPSW inputs and checks configuration and patch resolution. See [the porting record](porting.toml) and [the latest preflight evidence](evidence/2026-11-12-package-check.md) for the exact revisions and limits.
 
+To compile the kernel on GitHub Actions, run **macOS kernel build** under Actions. It uses UniXNU's reusable macOS workflow and stores redacted build logs; it does not upload kernel or IPSW artifacts.
+
 ## Outstanding work
 
 - Identify and pin a Kenzo Mu-Silicium/EDK2 firmware port; replace the provisional DSC and FD paths.
