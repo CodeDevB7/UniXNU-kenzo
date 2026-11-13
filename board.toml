@@ -30,11 +30,27 @@ packages = ["{uefi}", "{tree}/package", "{tree}/drivers/DarwinBoot", "{edk2}"]
 [firmware.defines]
 DEVICE_MODEL = "kenzo"
 
+[bootimg.image]
+base = 0x80000000
+kernel_offset = 0x8000
+ramdisk_offset = 0x01000000
+tags_offset = 0x100
+pagesize = 2048
+header_version = 0
+
+[[bootimg.dtb_node]]
+path = "/memory/splash_region@83000000"
+props = [
+  { name = "label", type = "s", value = "cont_splash_mem" },
+  { name = "reg", type = "x", value = ["0x0", "0x83000000", "0x0", "0x02800000"] },
+]
+
 [payload]
 volume = "KENZO"
 size_mib = 192
 loader = "firmware"
 title = "UniXNU"
+dram_size = "0x80000000"
 kernel_args = ["-v", "serial=3"]
 
 [package]
