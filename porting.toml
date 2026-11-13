@@ -53,14 +53,14 @@ id = "memory"
 status = "planned"
 components = []
 paths = ["dts/**", "package/*Smmu*", "package/*Memory*", "scripts/*smmu*", "scripts/*memory*"]
-inputs = ["The live active FDT reports /memory/reg <0 0x80000000 0 0x80000000>, matching the current DTS 2 GiB window; Linux reports CPUs 0-5 online.", "The live tree exposes no /reserved-memory node; bootargs mention ramoops_memreserve=4M. This Android FDT does not establish complete UEFI carveouts."]
+inputs = ["The live active FDT reports /memory/reg <0 0x80000000 0 0x80000000>, matching the current DTS 2 GiB window; Linux reports CPUs 0-5 online.", "Analysis of kenzo-dump/iomem.txt and extracted_dtb_0.dtb identifies exact physical firmware carveout nodes and sizes."]
 configuration = ["Record the board.toml fields, DTS properties and defconfig values used for memory and dma."]
 procedure = ["Follow the memory and dma stage in the porting guide and record the actual commands."]
-findings = ["The active Android FDT confirms the 2 GiB DRAM range at 0x80000000. It has no reserved-memory node, and the ramoops_memreserve=4M bootarg is not a complete UEFI memory map."]
+findings = ["The active Android FDT confirms the 2 GiB DRAM range at 0x80000000. All memory gaps in iomem.txt are reconciled to device-tree nodes: other_ext_region (5M at 0x86300000), modem_region (86M at 0x86c00000), reloc_region (23M at 0x8c200000), and tzapp_region (25M at 0x8dd00000). Upper System RAM from 0x8f600000 to 0xffffffff (1802 MiB) is continuous and free.", "Recommended placement for UEFI FD (FD_BASE) is in upper RAM (e.g. 0x90000000 or 0x9fc00000), safely above all carveouts."]
 completion = ["All handoff regions are accounted for and each enabled DMA engine accesses its allocated range with the documented cache policy."]
-limits = ["Complete DRAM banks, firmware carveouts, DMA addressability, cache policy and SMMU ownership remain unverified."]
-next_action = ["Capture and reconcile the future UEFI memory map and firmware carveouts before setting payload memory values."]
-evidence = [{ kind = "source", reference = "evidence/2026-11-12-dtb-inventory.md", result = "The live device selector matches generic DTB 0; the source memory reg is zeroed and bootloader-populated at runtime." }, { kind = "device", reference = "evidence/2026-11-12-live-device-tree.md", command = "adb exec-out su -c 'toybox tar -C /proc/device-tree -cf - .' (SELinux temporarily Permissive with user authorization, restored to Enforcing)", revision = "1ebf05c7198156efb47a25aa8b6879b9e338b374", result = "Live /memory confirms the 2 GiB physical window. No reserved-memory node is exposed; UEFI carveouts remain unknown." }]
+limits = ["Complete DRAM banks, firmware carveouts, DMA addressability, cache policy and SMMU ownership remain unverified on UEFI."]
+next_action = ["Verify UEFI FD base placement and reconcile future UEFI memory map against the identified carveouts."]
+evidence = [{ kind = "source", reference = "evidence/2026-11-12-dtb-inventory.md", result = "The live device selector matches generic DTB 0; the source memory reg is zeroed and bootloader-populated at runtime." }, { kind = "device", reference = "evidence/2026-11-12-live-device-tree.md", command = "adb exec-out su -c 'toybox tar -C /proc/device-tree -cf - .' (SELinux temporarily Permissive with user authorization, restored to Enforcing)", revision = "1ebf05c7198156efb47a25aa8b6879b9e338b374", result = "Live /memory confirms the 2 GiB physical window. No reserved-memory node is exposed; UEFI carveouts remain unknown." }, { kind = "source", reference = "evidence/2026-11-13-memory-map-analysis.md", result = "Reconciled iomem.txt and extracted_dtb_0.dtb carveouts: modem (86M), reloc (23M), tzapp (25M), other (5M), and free upper bank 0x8f600000-0xffffffff (1802 MiB)." }]
 
 [[area]]
 id = "storage"
@@ -81,14 +81,14 @@ id = "display"
 status = "planned"
 components = []
 paths = ["package/*Display*", "package/*Framebuffer*", "package/*Backlight*", "package/AppleARMBacklight.cpp", "package/GeniI2c*", "scripts/*display*", "scripts/*gop*", "scripts/*framebuffer*"]
-inputs = ["Identify the display hardware, resources and existing component interfaces for this board."]
+inputs = ["BOE NT35532 1080p video mode DSI panel (1080x1920, 24/32bpp) with continuous splash framebuffer at 0x83000000 (40 MiB).", "Hardware DT node /soc/qcom,mdss_mdp@1a00000/qcom,mdss_fb_primary binds to cont_splash_mem at 0x83000000."]
 configuration = ["Record the board.toml fields, DTS properties and defconfig values used for display."]
 procedure = ["Follow the display stage in the porting guide and record the actual commands."]
-findings = ["Collect the first display observation, its cause when established, and the resulting implementation decision."]
+findings = ["Primary FB and continuous splash memory are verified at 0x83000000 with 40 MiB size. UEFI SimpleFBDxe can bind directly to this pre-initialized buffer (1080x1920) without requiring full DSI/MDP5 clock init."]
 completion = ["A known frame appears with correct geometry and colors, then userland presentation and backlight controls work."]
-limits = ["Hardware inputs and implementation are pending for this example board."]
-next_action = ["Inventory the required display inputs before implementation."]
-evidence = []
+limits = ["Hardware inputs are identified; SimpleFBDxe integration into UEFI FD is pending."]
+next_action = ["Configure SimpleFBDxe in the Kenzo UEFI package using framebuffer base 0x83000000, 1080x1920."]
+evidence = [{ kind = "source", reference = "evidence/2026-11-13-memory-map-analysis.md", result = "Identified 1080x1920 BOE NT35532 panel and verified cont_splash framebuffer base at 0x83000000 (40 MiB) for SimpleFBDxe." }]
 
 [[area]]
 id = "input"
