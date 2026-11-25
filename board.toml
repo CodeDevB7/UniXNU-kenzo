@@ -16,6 +16,18 @@ include = ["ArmDTPlatform", "ArmCpu", "SoftwareAES", "XnuPrelink", "DarwinBoot"]
 defconfig = "kenzo_defconfig"
 config_fragments = ["arch:configs/common.config", "soc:configs/msm8956.config", "os:configs/ipados.config"]
 patch_series = ["arch:patches/xnu/series", "soc:patches/xnu/series", "os:patches/xnu/series", "device:patches/xnu/series"]
+archives = [
+  "build-corecrypto-14.py",
+  "build-corecrypto-14.py --namespace",
+  "component:ArmDTPlatform",
+  "component:ArmCpu",
+  "component:SoftwareAES",
+  "build-software-aes-bindings.py",
+  "build-mockfs-fixture.py",
+  "build-libpthread-kernel.py",
+  "build-sdhci-block.py",
+  "build-kenzo-pmgr.py",
+]
 
 [device_tree]
 source = "device:dts/kenzo.dts"

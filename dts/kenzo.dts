@@ -15,4 +15,14 @@
         bootargs = "-v serial=3";
         stdout-path = "/soc/serial@78b0000";
     };
+
+    soc {
+        sdhci: sdhci@7824900 {
+            unixnu,adt-name = "sdhci";
+            compatible = "unixnu,sdhci-block", "qcom,sdhci-msm";
+            reg = <0x07824900 0x500>;
+            interrupts = <0 0x7b 0>;
+            status = "okay";
+        };
+    };
 };

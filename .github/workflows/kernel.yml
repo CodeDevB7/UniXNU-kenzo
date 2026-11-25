@@ -41,6 +41,10 @@ jobs:
       - name: Install build tools
         run: brew install llvm lld mtools dtc unifdef
 
+      - name: Prepare Kenzo patches and components
+        working-directory: UniXNU
+        run: python3 ../device/scripts/prepare-kernel-patches.py .
+
       - name: Configure kernel
         working-directory: UniXNU
         run: ./unixnu defconfig kenzo_defconfig -D ../device
@@ -50,7 +54,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          python3 ../device/scripts/prepare-kernel-patches.py .
           set -o pipefail
           ./unixnu build kernel -D ../device -j 4 2>&1 | tee ../kernel-build.log
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare UniXNU kernel and ArmCpu patches for the Kenzo (MSM8956) board build."""
+"""Prepare UniXNU kernel and ArmCpu GICv2 patches for the Kenzo (MSM8956) board build."""
 
 from pathlib import Path
 import subprocess
@@ -32,7 +32,6 @@ else:
     hunk = "".join(lines[start:end])
     if "XNU_SHENG_PMGR" not in hunk or "sheng_pmgr_run" not in hunk:
         raise SystemExit(f"refusing to alter unexpected patch content in {patch}")
-    # Removing two added probe lines changes the new-file line offset for the following hunk.
     lines[end] = lines[end].replace("+1014,9", "+1012,9", 1)
     patch.write_text("".join(lines[:start] + lines[end:]))
     print("Removed the optional Sheng PMGR progress hunk from the generic boot-progress patch.")
