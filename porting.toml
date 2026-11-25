@@ -162,17 +162,17 @@ evidence = []
 
 [[area]]
 id = "packaging"
-status = "planned"
+status = "device-verified"
 components = []
 paths = ["scripts/*payload*", "scripts/*image*", "scripts/*flash*", "patches/**", "package/Kit.toml"]
-inputs = ["Identify the image assembly hardware, resources and existing component interfaces for this board."]
-configuration = ["Record the board.toml fields, DTS properties and defconfig values used for image assembly."]
-procedure = ["Follow the image assembly stage in the porting guide and record the actual commands."]
-findings = ["Collect the first image assembly observation, its cause when established, and the resulting implementation decision."]
+inputs = ["Stock Kenzo LK aboot enforces ABOOT_FORCE_RAMDISK_ADDR=0x82000000 (16 MiB window before splash_region@83000000 and XPU-protected carveouts).", "Pre-built kernel.macho (51.9 MiB, run 43171449006) and kenzo.adt (12.8 KB, run 45026987643) for ipados-17.7.11-21H461."]
+configuration = ["board.toml configures [bootimg.image] and [payload] for ipados-17.7.11-21H461; uefi-kenzo includes KenzoInitrdDecompressDxe (commit 3fd164b) to decompress KLZM-packed FAT32 ramdisks into protected high DRAM 0xA0000000..0xAFFFFFFF."]
+procedure = ["Pack EFI/UniXNU/unixnu.toml + Payloads/kernel.macho + Payloads/kernel.macho.adt into a 64 MiB FAT32 volume, compress with strict known-size LZMA1 ('KLZM' prefix, 6.26 MiB), pack with mkbootimg.py, and boot via temporary fastboot boot."]
+findings = ["Device-verified on physical Kenzo d6a8a3b1: 6.85 MiB KLZM boot.img booted without EDL, decompressed 64 MiB FAT32 into 0xA0000000, mounted \\EFI\\UniXNU\\unixnu.toml, loaded kernel.macho + kenzo.adt via DarwinBoot, exited UEFI Boot Services (green handoff bar), and branched into XNU _start (0x140006F5)."]
 completion = ["Kernel and prelink succeed, payload contains all declared inputs, and the boot image matches the bootloader format and size limit."]
-limits = ["Hardware inputs and implementation are pending for this example board."]
-next_action = ["Inventory the required image assembly inputs before implementation."]
-evidence = []
+limits = ["Kernel-only FAT32 payload (kernel.macho + kenzo.adt + unixnu.toml) is device-verified through DarwinBoot -> XNU branch; IPSW trust cache and Data ramdisk seed remain to be added after XNU early console/panic_screen bring-up."]
+next_action = ["Enable panic_screen / XNU entry probe in [payload] to inspect early XNU kernel execution and console output on the 0x83200000 framebuffer."]
+evidence = [{ kind = "device", reference = "evidence/2026-11-25-darwinboot-xnu-handoff.md", command = "fastboot -s d6a8a3b1 boot artifacts_v9\\kenzo-xnu-klzm-boot.img", revision = "3fd164b", result = "Verified on physical Kenzo d6a8a3b1: KLZM 64 MiB FAT32 decompressed to 0xA0000000, UniXNU loaded unixnu.toml, DarwinBoot verified CurrentEL 1 / video 0x83200000 1080x1920 32bpp / entry 0x140006F5, exited boot services (green bar), and branched to XNU kernel." }]
 
 [[area]]
 id = "diagnostics"
