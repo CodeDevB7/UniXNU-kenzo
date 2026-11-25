@@ -107,7 +107,10 @@ jobs:
           print(f"Downloaded {dmg}: {dmg.stat().st_size} bytes sha256={got_sha}", flush=True)
           assert got_sha == EXPECTED_SHA256, f"SHA mismatch {got_sha}"
 
-          Path("UniXNU/build").mkdir(parents=True, exist_ok=True)
+          import os, shutil, stat, tempfile
+          sys.path.insert(0, "UniXNU/drivers/DarwinBoot/Test")
+          import packed_ramdisk
+
           mount_dir = Path("/tmp/os_mount")
           mount_dir.mkdir(exist_ok=True)
           attached = plistlib.loads(subprocess.check_output(
@@ -115,12 +118,71 @@ jobs:
           ))
           dev = attached["system-entities"][0]["dev-entry"]
           out_dbr = Path("scratch-data.img")
+
+          def merge(mount, home, name, values):
+              path = mount / home / "Library/Preferences" / (name + ".plist")
+              path.parent.mkdir(parents=True, exist_ok=True)
+              content = plistlib.loads(path.read_bytes()) if path.is_file() else {}
+              content.update(values)
+              path.write_bytes(plistlib.dumps(content, fmt=plistlib.FMT_BINARY))
+              path.chmod(0o644)
+
           try:
-              subprocess.run(
-                  [sys.executable, "UniXNU/scripts/make-data-seed.py", str(mount_dir), str(out_dbr),
-                   "--gib", "3", "--build", "21H461", "--skip-setup"],
-                  check=True,
-              )
+              source = mount_dir / "private/var"
+              assert (mount_dir / "sbin/launchd").is_file() and source.is_dir(), "not an IPSW OS volume"
+              with tempfile.TemporaryDirectory(prefix="kenzo-data-") as td:
+                  work = Path(td)
+                  raw = work / "seed.cdr"
+                  subprocess.run(
+                      ["hdiutil", "create", "-size", "3g", "-layout", "NONE", "-fs", "APFS",
+                       "-volname", "Data", "-type", "UDTO", str(raw)],
+                      check=True,
+                  )
+                  dmnt = work / "mount"
+                  dmnt.mkdir()
+                  datt = plistlib.loads(subprocess.check_output(
+                      ["hdiutil", "attach", "-nobrowse", "-owners", "off", "-mountpoint", str(dmnt), "-plist", str(raw)]
+                  ))
+                  ddev = datt["system-entities"][0]["dev-entry"]
+                  try:
+                      for current, dirs, files in os.walk(source, followlinks=False):
+                          dirs[:] = [n for n in dirs if n != "staged_system_apps"]
+                          dest = dmnt / Path(current).relative_to(source)
+                          dest.mkdir(exist_ok=True)
+                          dest.chmod(stat.S_IMODE(Path(current).stat().st_mode))
+                          for n in list(dirs) + files:
+                              src, dst = Path(current) / n, dest / n
+                              if src.is_symlink():
+                                  dst.symlink_to(os.readlink(src))
+                                  if n in dirs:
+                                      dirs.remove(n)
+                              elif src.is_file():
+                                  shutil.copy2(src, dst)
+                      for n in ("keybags", "mobile/tmp", "tmp", "run", "containers/Bundle",
+                                "containers/Data/System", "containers/Shared/SystemGroup", "containers/Temp"):
+                          (dmnt / n).mkdir(parents=True, exist_ok=True)
+                      (dmnt / "tmp").chmod(0o1777)
+                      merge(dmnt, "mobile", "com.apple.purplebuddy", dict(
+                          SetupDone=True, SetupFinishedAllSteps=True, SetupVersion=11, daemonizeNeedsToRun=False))
+                      merge(dmnt, "mobile", "com.apple.purplebuddy.notbackedup", {n: False for n in (
+                          "ShouldRunDiagnosticsMiniBuddy", "ShouldRunHSA2MiniBuddy", "ShouldRunKeychainSyncMiniBuddy",
+                          "ShouldRunMesaMiniBuddy", "ShouldRunPaymentMiniBuddy", "ShouldRunStandardMiniBuddy", "SilentICDPUpgrade")})
+                      merge(dmnt, "mobile", "com.apple.managedconfiguration.notbackedup",
+                            dict(LockdownActivationIndicatesCloudConfigurationAvailable=False))
+                      merge(dmnt, "mobile", "com.apple.springboard", dict(
+                          BKNoWatchdogs=True, FBLaunchWatchdogExceptions={"com.apple.purplebuddy": 100.0},
+                          MCForceShowCloudConfigurationUI=False))
+                      merge(dmnt, "mobile", "com.apple.migration", dict(
+                          LastSystemVersion="21H461", DMUserDataDisposition=dict(SyntheticDidUpgrade=False, buildVersion="21H461")))
+                      for home in ("root", "mobile"):
+                          for n in ("backboardd", ".GlobalPreferences"):
+                              merge(dmnt, home, n, dict(
+                                  CAEnableDeepFramebuffer=False, CAEnableFramebufferCompression=False, CAEnableIOSurfaceCompression=False))
+                  finally:
+                      subprocess.run(["hdiutil", "detach", ddev], check=True)
+                  hdr = raw.open("rb").read(4096)
+                  assert hdr[32:36] == b"NXSB", f"expected NXSB at +32, got {hdr[32:36]!r}"
+                  packed_ramdisk.pack(raw, out_dbr)
           finally:
               subprocess.run(["hdiutil", "detach", dev], check=False)
 
