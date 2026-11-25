@@ -9,7 +9,7 @@ summary = "Xiaomi Redmi Note 3 (kenzo) Snapdragon 650 porting record."
 [[area]]
 id = "configuration"
 status = "host-verified"
-components = ["ArmDTPlatform", "ArmCpu", "SoftwareAES", "XnuPrelink", "DarwinBoot"]
+components = ["ArmDTPlatform", "ArmCpu", "SoftwareAES", "XnuPrelink", "DarwinBoot", "RamBlock", "GopFramebuffer", "AppleKeyStoreState"]
 paths = ["board.toml", "feeds.toml", "configs/**", "evidence/**", "scripts/prepare-kernel-patches.py", "unixnu.lock", ".gitmodules", ".github/**", ".gitignore"]
 inputs = ["Xiaomi Redmi Note 3, codename kenzo; Qualcomm MSM8956; selected profile ipados-17.7.11-21H461.", "Shared SoC feed points to CodeDevB7/UniXNU-msm8956-common at d6845aea8fc3e5c14993b269fcca92927e85fb45, corrected from the connected device's active FDT."]
 configuration = ["board.toml selects ArmDTPlatform, ArmCpu, SoftwareAES, XnuPrelink and DarwinBoot; kenzo_defconfig; SoC and OS config fragments; ordered arch, SoC, OS and device patch series.", "[package] unixnu is ../UniXNU and [package.defconfig] maps ipados-17.7.11-21H461 to kenzo_defconfig.", "[bootimg.image] defines base=0x80000000, pagesize=2048, offsets; duplicate [[bootimg.dtb_node]] for splash_region was removed because Resources/DTBs/kenzo.dtb already contains /memory/splash_region@83000000."]
@@ -64,17 +64,17 @@ evidence = [{ kind = "source", reference = "evidence/2026-11-12-dtb-inventory.md
 
 [[area]]
 id = "storage"
-status = "planned"
-components = []
-paths = ["drivers/ShengUfs", "scripts/*ufs*", "scripts/*storage*", "scripts/*userdata*", "scripts/*root*"]
-inputs = ["Identify the storage and root hardware, resources and existing component interfaces for this board."]
-configuration = ["Record the board.toml fields, DTS properties and defconfig values used for storage and root."]
-procedure = ["Follow the storage and root stage in the porting guide and record the actual commands."]
-findings = ["Collect the first storage and root observation, its cause when established, and the resulting implementation decision."]
-completion = ["Host: register, clock, link and SMMU facts match the board inventory.", "Reads: SCSI capacity, GPT and known blocks are correct; OS/SystemOS windows stay within userdata.", "Root: the configured volume mounts and launchd starts. Persistence: writes survive reboot within the allocated Data region."]
-limits = ["Hardware inputs and implementation are pending for this example board."]
-next_action = ["Inventory the required storage and root inputs before implementation."]
-evidence = []
+status = "device-verified"
+components = ["RamBlock"]
+paths = ["drivers/ShengUfs", "package/NativeSdhciBlock.cpp", "package/storage-bindings.json", "scripts/*sdhci*", "scripts/*ufs*", "scripts/*storage*", "scripts/*userdata*", "scripts/*root*"]
+inputs = ["Qualcomm MSM8956 SDCC1 (16 GB eMMC @ 0x07824900 / core 0x07824000) and SDCC2 (32 GB external microSD @ 0x07864900 / core 0x07864000).", "PM8950 LDO11 (2.95V VDD) and LDO12 (2.95V VDD-IO) controlled via RPM-SMD rpm_requests channel over SMEM (0x86300000) and APCS IPC (0x0B011008); TLMM_SDC2_HDRV_PULL_CTL at 0x01109000."]
+configuration = ["dts/kenzo.dts exports sdhci@7864900 (SDCC2 microSD) for SHNGROOT (OS + SystemOS) so internal eMMC Android userdata stays untouched; kenzo_defconfig enables CONFIG_XNU_SOURCE_STORAGE=y, CONFIG_XNU_OWNER_ROOT_AUDIT=y, CONFIG_XNU_OWNER_ROOT_TRUST=y, CONFIG_XNU_OWNER_CACHE_MOUNT=y, CONFIG_XNU_OWNER_CACHE_STARTUP=y, CONFIG_XNU_OWNER_BOOT_MANIFEST=y, CONFIG_XNU_OWNER_UNION_SYSTEMOS=y, CONFIG_XNU_NATIVE_RAM_BLOCK=y, and CONFIG_XNU_OWNER_DATA_MOUNT=y."]
+procedure = ["Verify SDCC1 eMMC GPT and SDCC2 microSD MBR reads via uefi-kenzo (4c06de6), write SHNGROOT (OS + SystemOS) to microSD, and boot Stage 3 XNU kernel with NativeSdhciBlock + NativeRamBlock."]
+findings = ["Device-verified on physical Kenzo d6a8a3b1 (uefi-kenzo 4c06de6, CI run 45620754645): RPM-SMD voted PM8950 LDO11+LDO12 2.95V with clean 0x0C ACKs, TLMM_SDC2 (0x01109000) switched 0x00000BDB->0x00001FE4, SDCC1 eMMC entered TRAN and read LBA 1 'EFI PART' (first=0x22, last=0x1D59FDE), and SDCC2 32 GB microSD entered TRAN (RCA=0xAAAA) and read LBA 0 MBR 55 AA (part0 len=0x03B71BDF)."]
+completion = ["Host: register, clock, link and SMMU facts match the board inventory.", "Reads: eMMC GPT and microSD MBR/SHNGROOT sectors read cleanly; OS/SystemOS windows stay on microSD.", "Root: the configured volume mounts and launchd starts. Persistence: writes work in the RamBlock Data volume."]
+limits = ["SDCC1 eMMC GPT read and SDCC2 microSD MBR read are device-verified in UEFI; XNU Stage 3 SHNGROOT OS+SystemOS mount and /sbin/launchd boot remain to be verified next."]
+next_action = ["Build Stage 3 kernel (NativeSdhciBlock + NativeRamBlock + GopFramebuffer + AppleKeyStoreState), write shngroot-21H461.img to microSD, and boot /sbin/launchd on Kenzo."]
+evidence = [{ kind = "device", reference = "evidence/2026-11-25-sdcc1-emmc-sdcc2-microsd-verified.md", command = "fastboot -s d6a8a3b1 boot artifacts_uefi_probe\\kenzo-uefi-firmware-debug\\kenzo-uefi-only-boot.img", revision = "4c06de6d1198b8ca4c2ceae069d385f3f69f5e53", result = "Physical Kenzo d6a8a3b1 verified live RPM-SMD LDO11+LDO12 2.95V, SDCC1 eMMC LBA 1 'EFI PART', and SDCC2 32 GB microSD TRAN + LBA 0 MBR 55 AA." }]
 
 [[area]]
 id = "display"

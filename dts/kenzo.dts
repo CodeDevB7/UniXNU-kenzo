@@ -17,11 +17,13 @@
     };
 
     soc {
-        sdhci: sdhci@7824900 {
+        // SDCC2 (external 32 GB microSD slot) hosts SHNGROOT (OS + SystemOS),
+        // keeping internal eMMC (SDCC1) Android userdata 100% untouched.
+        sdhci: sdhci@7864900 {
             unixnu,adt-name = "sdhci";
             compatible = "unixnu,sdhci-block", "qcom,sdhci-msm";
-            reg = <0x07824900 0x500>,
-                  <0x07824000 0x800>;
+            reg = <0x07864900 0x500>,
+                  <0x07864000 0x800>;
             status = "okay";
         };
     };

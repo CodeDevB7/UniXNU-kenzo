@@ -10,7 +10,7 @@ description = "Xiaomi Redmi Note 3 (Kenzo) Snapdragon 650"
 kit = "kenzo"
 
 [components]
-include = ["ArmDTPlatform", "ArmCpu", "SoftwareAES", "XnuPrelink", "DarwinBoot"]
+include = ["ArmDTPlatform", "ArmCpu", "SoftwareAES", "XnuPrelink", "DarwinBoot", "RamBlock", "GopFramebuffer", "AppleKeyStoreState"]
 
 [kernel]
 defconfig = "kenzo_defconfig"
@@ -25,8 +25,11 @@ archives = [
   "build-software-aes-bindings.py",
   "build-mockfs-fixture.py",
   "build-libpthread-kernel.py",
+  "component:RamBlock",
   "build-sdhci-block.py",
   "build-kenzo-pmgr.py",
+  "component:AppleKeyStoreState",
+  "build-kenzo-display.py",
 ]
 
 [device_tree]
@@ -59,7 +62,12 @@ size_mib = 192
 loader = "firmware"
 title = "UniXNU"
 dram_size = "0x80000000"
-kernel_args = ["-v", "serial=3"]
+kernel_args = ["-v", "serial=3", "debug=0x144", "keepsyms=1", "smp=1", "armcpu-self-ipi=1", "sheng-pmgr=2", "no-lc=1"]
+
+[payload.adt]
+root_match_volume_uuid = "04769D26-2CA0-4825-B443-E2E5F88300F2"
+packed_data_ramdisk = true
+owned_memory_size = "0x20000000"
 
 [package]
 unixnu = "../UniXNU"

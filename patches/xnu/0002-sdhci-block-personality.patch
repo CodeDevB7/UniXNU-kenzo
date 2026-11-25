@@ -1,12 +1,19 @@
 --- a/iokit/KernelConfigTables.cpp
 +++ b/iokit/KernelConfigTables.cpp
-@@ -105,4 +105,9 @@ const char * gIOKernelConfigTables =
+@@ -105,4 +105,15 @@ const char * gIOKernelConfigTables =
      "     'IOProbeScore'    = 500:32;"
      "   }"
  #endif
 +    "   ,{"
 +    "     'IOClass'         = NativeSdhciBlock;"
 +    "     'IOProviderClass' = IOPlatformDevice;"
++    "     'IOProbeScore'    = 1000:32;"
++    "   }"
++    "   ,{"
++    "     'IOClass'         = NativeRamBlock;"
++    "     'IOMatchCategory' = NativeRamBlock;"
++    "     'IOProviderClass' = IOResources;"
++    "     'IOResourceMatch' = IOBSD;"
 +    "     'IOProbeScore'    = 1000:32;"
 +    "   }"
      ")";

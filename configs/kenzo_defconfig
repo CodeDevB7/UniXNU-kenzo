@@ -11,7 +11,21 @@ CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"
 CONFIG_XNU_DT_PANIC_REGION=y
 # Publish ApplePMGRNub for AMFI (zero-MMIO iPadOS 17.7.11 ApplePMGR binding).
 CONFIG_XNU_SHENG_PMGR=y
-# Force-load Qualcomm MSM8956 SDHCI 3.0 eMMC read-only block transport.
+# Bypass VirtioMmioBlock/Sheng VerifiedRootProbe gates while keeping NativeSdhciBlock + NativeRamBlock.
+CONFIG_XNU_SOURCE_STORAGE=y
+# Stage 3 owner root acceptance, SystemOS union mount, boot-manifest-hash, and RamBlock Data mount.
+CONFIG_XNU_OWNER_ROOT_AUDIT=y
+CONFIG_XNU_OWNER_ROOT_TRUST=y
+CONFIG_XNU_OWNER_CACHE_MOUNT=y
+CONFIG_XNU_OWNER_CACHE_STARTUP=y
+CONFIG_XNU_OWNER_BOOT_MANIFEST=y
+CONFIG_XNU_OWNER_UNION_SYSTEMOS=y
+CONFIG_XNU_NATIVE_RAM_BLOCK=y
+CONFIG_XNU_OWNER_DATA_MOUNT=y
+CONFIG_XNU_OWNER_DATA_VOLUME_UUID="5CAD653D-3BFC-42B2-9DA1-00AD53CD7B81"
+# Stage 3 GopFramebuffer (NativeLegacyDisplay + NativeGOPPresenter) + AppleKeyStoreState.
+CONFIG_XNU_NATIVE_LEGACY_DISPLAY=y
+# Force-load Qualcomm MSM8956 SDHCI (microSD SHNGROOT OS+SystemOS) + NativeRamBlock.
 CONFIG_XNU_EXTRA_LD_ARCHIVES="-Wl,-force_load,{tree}/build/sdhciblock/libSdhciBlock.a"
 # CONFIG_XNU_NATIVE_UFS is not set
 # CONFIG_XNU_NATIVE_ADRENO is not set
