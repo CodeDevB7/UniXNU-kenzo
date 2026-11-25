@@ -107,6 +107,7 @@ jobs:
           print(f"Downloaded {dmg}: {dmg.stat().st_size} bytes sha256={got_sha}", flush=True)
           assert got_sha == EXPECTED_SHA256, f"SHA mismatch {got_sha}"
 
+          Path("UniXNU/build").mkdir(parents=True, exist_ok=True)
           mount_dir = Path("/tmp/os_mount")
           mount_dir.mkdir(exist_ok=True)
           attached = plistlib.loads(subprocess.check_output(
