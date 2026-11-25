@@ -55,7 +55,7 @@ int native_verified_block_root_authorized(dev_t device);
 int native_verified_block_manifest_sha384(dev_t device, const char *uuid, uint8_t digest[48]);
 int native_verified_block_volume_device(const char *uuid, dev_t *device, char *path, size_t size);
 
-// Weak-import persistence stubs for NativeRamBlock (run Data volume purely in RAM).
+// Weak-import persistence & loader-release stubs for NativeRamBlock (run Data volume purely in RAM).
 unsigned native_ufs_store_mode(void) { return 0; }
 int native_ufs_store_open(uint64_t, uint64_t *, const char **) { return -1; }
 int native_ufs_store_read(uint64_t, uint32_t, void *) { return -1; }
@@ -63,6 +63,7 @@ int native_ufs_store_write(uint64_t, uint32_t, const void *) { return -1; }
 int native_ufs_store_write_cached(uint64_t, uint32_t, const void *) { return -1; }
 int native_ufs_store_sync(void) { return 0; }
 unsigned native_ufs_store_gpt_check(void) { return 0; }
+bool ml_static_mfree_prepare(vm_offset_t, vm_size_t) { return false; }
 }
 
 namespace {

@@ -107,11 +107,13 @@ void native_legacy_gpu_fallback_observed(int) {}
 
 void native_legacy_vsync_observed(unsigned, unsigned) {}
 
-// Optional Adreno/DPU weak_import stubs (keep CPU GOP scanout path cleanly linked).
+// Optional Adreno/DPU/GPU-trace weak_import stubs (keep CPU GOP scanout path cleanly linked).
 bool native_adreno_fences(uint32_t *, uint32_t *) { return false; }
 bool native_adreno_fences_detail(uint32_t *, uint32_t *, uint32_t *) { return false; }
 uint32_t native_ufs_dpu_map(unsigned, const uint64_t *, unsigned) { return 0; }
 volatile uint32_t native_ufs_dpu_state = 0;
+int native_gpu_trace_enabled(void) { return 0; }
+void native_gpu_trace_record(uint32_t, uint32_t, const uint64_t *, uint32_t) {}
 
 // --- AppleKeyStoreState (NativeKeyStoreEvents) board callbacks ---
 bool native_aks_state_enabled(void) { return true; }
