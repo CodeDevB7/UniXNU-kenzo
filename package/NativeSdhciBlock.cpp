@@ -1156,8 +1156,12 @@ bool NativeSdhciBlock::start(IOService *provider)
         if (!child) {
             continue;
         }
+        if (!child->init(nullptr)) {
+            child->release();
+            continue;
+        }
         child->configureWindowChild(this, extraWindows[i]);
-        if (!child->init() || !child->attach(this)) {
+        if (!child->attach(this)) {
             child->release();
             continue;
         }

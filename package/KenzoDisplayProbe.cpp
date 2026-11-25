@@ -169,7 +169,7 @@ static void startKeyStore(IOService *platform)
     if (!aks) {
         return;
     }
-    if (!aks->init() || !aks->attach(platform)) {
+    if (!aks->init(nullptr) || !aks->attach(platform)) {
         aks->release();
         return;
     }
@@ -205,9 +205,10 @@ static void startLegacyDisplay(IOService *platform)
 
     const uint64_t fbBytes = static_cast<uint64_t>(video.v_rowBytes) * static_cast<uint64_t>(video.v_height);
     IODeviceMemory *fbMem = IODeviceMemory::withRange(video.v_baseAddr, fbBytes);
-    OSArray *memArray = fbMem ? OSArray::withObjects(reinterpret_cast<const OSObject **>(&fbMem), 1, 1) : nullptr;
+    const OSObject *memObjs[1] = { fbMem };
+    OSArray *memArray = fbMem ? OSArray::withObjects(memObjs, 1, 1) : nullptr;
     IOService *gopNub = new IOService;
-    if (!fbMem || !memArray || !gopNub || !gopNub->init()) {
+    if (!fbMem || !memArray || !gopNub || !gopNub->init(nullptr)) {
         OSSafeReleaseNULL(fbMem);
         OSSafeReleaseNULL(memArray);
         OSSafeReleaseNULL(gopNub);
@@ -227,7 +228,7 @@ static void startLegacyDisplay(IOService *platform)
     if (!display) {
         return;
     }
-    if (!display->init() || !display->attach(gopNub)) {
+    if (!display->init(nullptr) || !display->attach(gopNub)) {
         display->release();
         return;
     }
@@ -240,7 +241,9 @@ static void startLegacyDisplay(IOService *platform)
     }
     display->registerService();
     IOLog("KenzoDisplayProbe: NativeLegacyDisplay online %lux%lu @ 0x%lx\n",
-          video.v_width, video.v_height, video.v_baseAddr);
+          static_cast<unsigned long>(video.v_width),
+          static_cast<unsigned long>(video.v_height),
+          static_cast<unsigned long>(video.v_baseAddr));
 }
 
 void native_legacy_display_late_probe(void)
