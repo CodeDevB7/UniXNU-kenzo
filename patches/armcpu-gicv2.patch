@@ -1,0 +1,331 @@
+--- a/ArmCpu.cpp
++++ b/ArmCpu.cpp
+@@ -237,6 +237,7 @@
+ {
+   uint64_t frequency;
+   __asm__ volatile ("mrs %0, cntfrq_el0" : "=r" (frequency));
++  if (frequency == 0) { frequency = 19200000ULL; }
+   uint64_t started = counter ();
+   for (unsigned polls = 0; (read32 (base, offset) & mask) != 0; ++polls) {
+     if (polls > 100000 && counter () - started > frequency) {
+@@ -277,6 +278,27 @@
+ static class ArmCpu *volatile gPending[ARMCPU_SMP_SLOTS];
+ static volatile uint32_t gBootRegistered = 0;
+ static bool gRemoteGic = false; // smp-gic=1: the boot CPU prepares a new core's redistributor before CPU_ON
++static bool gGicV2 = false;
++static uintptr_t gGicc = 0;
++static uint32_t gVirtualTimerPpi = 27;
++static uint8_t gGicV2TargetMask[ARMCPU_SMP_SLOTS];
++static uint8_t gGicV2BootTarget = 1;
++
++static bool compatibleContains (OSData *data, const char *needle)
++{
++  if (data == nullptr || needle == nullptr) { return false; }
++  const char *bytes = static_cast<const char *> (data->getBytesNoCopy ());
++  const unsigned len = data->getLength ();
++  const unsigned nlen = static_cast<unsigned> (strlen (needle));
++  unsigned pos = 0;
++  while (pos < len) {
++    unsigned end = pos;
++    while (end < len && bytes[end] != '\0') { ++end; }
++    if (end - pos == nlen && memcmp (bytes + pos, needle, nlen) == 0) { return true; }
++    pos = end + 1;
++  }
++  return false;
++}
+ 
+ // Shared peripheral interrupts (GICv3 SPIs, INTID 32..1019). A driver attaches a handler for one INTID; the line is set to
+ // Group 1 non-secure, priority 0xa0, the given trigger and routed to the boot CPU (GICD_IROUTER, affinity routing is on),
+@@ -329,12 +351,8 @@
+     return nullptr;
+   }
+   memcpy (&id, reg->getBytesNoCopy (), sizeof (id));
+-  if (ml_get_cpu_number (id) != ml_get_boot_cpu_number ()) {
+-    unsigned smp = 0;
+-    PE_parse_boot_argn ("smp", &smp, sizeof (smp));
+-    if (smp == 0 || ml_get_cpu_number (id) < 0 || ml_get_cpu_number (id) >= ARMCPU_SMP_SLOTS) {
+-      return nullptr; // Secondary startup is opt-in (smp=1).
+-    }
++  if (ml_get_cpu_number (id) < 0 || ml_get_cpu_number (id) >= ARMCPU_SMP_SLOTS) {
++    return nullptr;
+   }
+   return IOCPU::probe (provider, score);
+ }
+@@ -353,10 +371,13 @@
+   OSData *compatible = OSDynamicCast (OSData, gic->getProperty ("compatible"));
+   uint64_t bus[3];
+   uint64_t regions[4];
++  const bool isV3 = compatibleContains (compatible, "arm,gic-v3");
++  const bool isQcomGic2 = compatibleContains (compatible, "qcom,msm-qgic2");
++  const bool isV2 = !isV3 && (compatibleContains (compatible, "arm,cortex-a15-gic") ||
++                              compatibleContains (compatible, "arm,gic-400") || isQcomGic2);
+   bool valid = (ranges != nullptr) && (ranges->getLength () == sizeof (bus)) &&
+                (reg != nullptr) && (reg->getLength () == sizeof (regions)) &&
+-               (compatible != nullptr) && (compatible->getLength () == 11) &&
+-               (memcmp (compatible->getBytesNoCopy (), "arm,gic-v3", 11) == 0);
++               (isV3 || isV2);
+   if (valid) {
+     memcpy (bus, ranges->getBytesNoCopy (), sizeof (bus));
+     memcpy (regions, reg->getBytesNoCopy (), sizeof (regions));
+@@ -369,7 +390,8 @@
+   armcpu_gic_stride = static_cast<uint32_t> (gRedistStride);
+   soc->release ();
+   gic->release ();
+-  if (!valid || (regions[1] < 0x10000) || (regions[3] < 0x20000)) {
++  if (!valid || (isV3 && ((regions[1] < 0x10000) || (regions[3] < 0x20000))) ||
++      (isV2 && ((regions[1] < 0x1000) || (regions[3] < 0x1000)))) {
+     return false;
+   }
+   for (unsigned index = 0; index < 4; index += 2) {
+@@ -392,11 +414,14 @@
+     return false;
+   }
+   dist = static_cast<uintptr_t> (distributor->getVirtualAddress ());
+-  if (((read32 (dist, 0xffe8) >> 4) & 15) != 3) {
++  if (isV3 && (((read32 (dist, 0xffe8) >> 4) & 15) != 3)) {
+     return false;
+   }
+   redistBase = static_cast<uintptr_t> (redistributors->getVirtualAddress ());
+   redistSize = regions[3];
++  gGicV2 = isV2;
++  gGicc = isV2 ? redistBase : 0;
++  gVirtualTimerPpi = isQcomGic2 ? 20U : 27U;
+   gDistMap = distributor;
+   gRedistMap = redistributors;
+   gDist = dist;
+@@ -407,6 +432,26 @@
+ 
+ bool ArmCpu::initDistributor (void)
+ {
++  if (gGicV2) {
++    write32 (dist, 0x000, 0U);
++    unsigned interrupts = ((read32 (dist, 4) & 31U) + 1U) * 32U;
++    uint8_t bootMask = static_cast<uint8_t> (read32 (dist, 0x800) & 0xffU);
++    if (bootMask == 0) { bootMask = 1; }
++    gGicV2BootTarget = bootMask;
++    uint32_t targetAll = static_cast<uint32_t> (bootMask) * 0x01010101U;
++    for (unsigned id = 32; id < interrupts && id < 1020; id += 32) {
++      write32 (dist, 0x180 + id / 8, 0xffffffffU);
++      write32 (dist, 0x280 + id / 8, 0xffffffffU);
++      write32 (dist, 0x080 + id / 8, 0xffffffffU);
++    }
++    for (unsigned id = 32; id < interrupts && id < 1020; id += 4) {
++      write32 (dist, 0x400 + id, 0xa0a0a0a0U);
++      write32 (dist, 0x800 + id, targetAll);
++    }
++    write32 (dist, 0x000, 1U);
++    __asm__ volatile ("dsb sy; isb" ::: "memory");
++    return true;
++  }
+   uint32_t ctl = read32 (dist, 0);
+   write32 (dist, 0, ctl & ~3U);
+   if (!waitClear (dist, 0, 1U << 31)) { return false; }
+@@ -422,6 +467,10 @@
+ // Runs on the core whose redistributor is configured: the frame is selected by that core's own MPIDR affinity.
+ bool ArmCpu::wakeRedistributor (bool local)
+ {
++  if (gGicV2) {
++    if (local) { __asm__ volatile ("mrs %0, mpidr_el1" : "=r" (affinity)); }
++    return true;
++  }
+   uintptr_t frames = redistBase;
+   // local: this core finds its own frame from MPIDR. Remote: the boot CPU prepares a not-yet-started core's frame
+   // from the DT affinity, so the new core never needs GIC MMIO of its own.
+@@ -464,6 +513,37 @@
+ 
+ void ArmCpu::enableGic (void)
+ {
++  if (gGicV2) {
++    if (logicalId < ARMCPU_SMP_SLOTS) {
++      uint8_t mask = static_cast<uint8_t> (read32 (dist, 0x800) & 0xffU);
++      gGicV2TargetMask[logicalId] = mask != 0 ? mask : static_cast<uint8_t> (1U << (logicalId & 7));
++    }
++    if (!secondary) { gBootAffinity = affinity & 0xff00ffffffULL; }
++    write32 (dist, 0x180, 0xffffffffU);
++    write32 (dist, 0x280, 0xffffffffU);
++    write32 (dist, 0x080, 0xffffffffU);
++    for (unsigned offset = 0x400; offset < 0x420; offset += 4) {
++      write32 (dist, offset, 0x80808080U);
++    }
++    write32 (dist, 0x100, 0xffffU | (1U << gVirtualTimerPpi));
++    write32 (gGicc, 0x004, 0xffU);
++    write32 (gGicc, 0x008, 0U);
++    write32 (gGicc, 0x000, 1U);
++    write32 (dist, 0x000, 1U);
++    __asm__ volatile ("dsb sy; isb" ::: "memory");
++    if (!secondary) {
++      armcpu_gic_boot[0] = read32 (dist, 0x080);
++      armcpu_gic_boot[1] = read32 (dist, 0x100);
++      armcpu_gic_boot[2] = read32 (dist, 0x000);
++      armcpu_gic_boot[3] = read32 (dist, 0x004);
++      armcpu_gic_boot[4] = gVirtualTimerPpi;
++      armcpu_gic_boot[5] = read32 (gGicc, 0x004);
++      armcpu_gic_boot[6] = read32 (gGicc, 0x000);
++      armcpu_gic_boot[7] = gGicV2BootTarget;
++    }
++    armcpu_gic_ready = 1;
++    return;
++  }
+   uint64_t value;
+   __asm__ volatile ("mrs %0, icc_sre_el1" : "=r" (value));
+   value |= 1;
+@@ -519,6 +599,7 @@
+   unsigned stats = 0;
+   PE_parse_boot_argn ("diag", &stats, sizeof (stats));
+   __asm__ volatile ("mrs %0, cntfrq_el0" : "=r" (gCounterHz));
++  if (gCounterHz == 0) { gCounterHz = 19200000ULL; }
+   gStats = stats == 1 && gCounterHz != 0;
+   unsigned idleLatencyUs = 0;
+   PE_parse_boot_argn ("armcpu-idle-latency-us", &idleLatencyUs, sizeof (idleLatencyUs));
+@@ -529,6 +610,13 @@
+   logicalId = static_cast<uint32_t> (ml_get_cpu_number (physical));
+   secondary = logicalId != static_cast<uint32_t> (ml_get_boot_cpu_number ());
+   if (secondary) {
++    unsigned smpArg = 0;
++    PE_parse_boot_argn ("smp", &smpArg, sizeof (smpArg));
++    if (smpArg == 0) {
++      if (!IOCPU::start (provider)) { return false; }
++      setCPUState (kIOCPUStateStopped);
++      return true;
++    }
+     if (!IOCPU::start (provider)) { return false; }
+     armcpu_smp_step[logicalId] = 1;
+     affinity = physical;
+@@ -758,10 +846,17 @@
+   const bool fromIdle = core.wakeOpen != 0;
+   for (;;) {
+     armcpu_irq_phase=1;
++    uint64_t rawId;
+     uint64_t id;
+-    __asm__ volatile ("mrs %0, icc_iar1_el1" : "=r" (id));
+-    armcpu_irq_id=static_cast<uint32_t>(id & 0xffffff);
+-    if ((id & 0xffffff) >= 1020) {
++    if (gGicV2) {
++      rawId = read32 (gGicc, 0x00c);
++      id = rawId & 0x3ffU;
++    } else {
++      __asm__ volatile ("mrs %0, icc_iar1_el1" : "=r" (rawId));
++      id = rawId & 0xffffffU;
++    }
++    armcpu_irq_id=static_cast<uint32_t>(id);
++    if (id >= 1020) {
+       armcpu_irq_phase=0;
+       if (drained > 128) { armcpu_irq_long_drains = armcpu_irq_long_drains + 1; }
+       if (drained > armcpu_irq_drain_most) { armcpu_irq_drain_most = drained; }
+@@ -770,7 +865,7 @@
+     // Only an interrupt that never stops coming (a level line nobody clears) is a fault: a million in one drain.
+     ++drained;
+     if(diagnosePower && drained>1000000)panic("ArmCpu: IRQ drain exceeds 1000000 id=%llx timer=%llu IPI=%llu",id,armcpu_timer_interrupts,armcpu_ipi_interrupts);
+-    if ((id & 0xffffff) == 27) {
++    if (id == gVirtualTimerPpi) {
+       armcpu_timer_interrupts = armcpu_timer_interrupts + 1;
+       armcpu_core_timer[logicalId & 7] = armcpu_core_timer[logicalId & 7] + 1;
+       timerTaken (core, core.wakeOpen != 0);
+@@ -809,7 +904,12 @@
+       }
+     }
+     armcpu_irq_phase=6;
+-    __asm__ volatile ("msr icc_eoir1_el1, %0; isb" :: "r" (id) : "memory");
++    if (gGicV2) {
++      write32 (gGicc, 0x010, static_cast<uint32_t> (rawId));
++      __asm__ volatile ("dsb sy; isb" ::: "memory");
++    } else {
++      __asm__ volatile ("msr icc_eoir1_el1, %0; isb" :: "r" (rawId) : "memory");
++    }
+   }
+ }
+ 
+@@ -836,7 +936,18 @@
+     uint64_t none = 0;
+     __atomic_compare_exchange_n (&gCore[peer->logicalId & 7].sentAt, &none, before, false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
+   }
+-  if (gSpiIpi) {
++  if (gGicV2) {
++    __asm__ volatile ("dsb ishst" ::: "memory");
++    if (peer == this) {
++      write32 (gDist, 0xf00, (2U << 24) | 0U);
++    } else {
++      uint8_t mask = (peer->logicalId < ARMCPU_SMP_SLOTS && gGicV2TargetMask[peer->logicalId] != 0)
++          ? gGicV2TargetMask[peer->logicalId]
++          : static_cast<uint8_t> (1U << (peer->logicalId & 7));
++      write32 (gDist, 0xf00, (static_cast<uint32_t> (mask) << 16) | 0U);
++    }
++    __asm__ volatile ("dsb sy; isb" ::: "memory");
++  } else if (gSpiIpi) {
+     spiIpiSend (gDist, peer->logicalId & 7);
+   } else {
+     __asm__ volatile ("dsb ishst; msr icc_sgi1r_el1, %0; isb" :: "r" (sgi) : "memory");
+@@ -906,6 +1017,10 @@
+ // kernel never sees it. out[8], out[9]: CNTVCT ticks of one ICC_SGI1R_EL1 write and of one ICC_PMR_EL1 read (a trapped write costs far more). out: 0 MPIDR, 1 INTIDs pending as Group 1, 2 INTIDs pending as Group 0, 3 ICC_PMR, 4 ICC_IGRPEN1, 5 ICC_SRE, 6 ICC_CTLR, 7 ICC_RPR.
+ extern "C" void armcpu_sgi_selfprobe (uint64_t *out)
+ {
++  if (gGicV2) {
++    for (unsigned i = 0; i < 10; i++) { out[i] = 0; }
++    return;
++  }
+   uint64_t mpidr, daif, v;
+   __asm__ volatile ("mrs %0, mpidr_el1" : "=r" (mpidr));
+   __asm__ volatile ("mrs %0, daif; msr daifset, #2; isb" : "=r" (daif) :: "memory");
+@@ -958,8 +1073,14 @@
+ 
+ extern "C" void armcpu_ipi_selftest (uint64_t aff)
+ {
++  armcpu_ipi_selftest_sent = armcpu_ipi_selftest_sent + 1;
++  if (gGicV2) {
++    __asm__ volatile ("dsb ishst" ::: "memory");
++    write32 (gDist, 0xf00, (2U << 24) | 0U);
++    __asm__ volatile ("dsb sy; isb" ::: "memory");
++    return;
++  }
+   uint64_t sgi = ((aff & 0xff00000000ULL) << 16) | ((aff & 0xff0000) << 16) | ((aff & 0xff00) << 8) | (1ULL << (aff & 0xff));
+-  armcpu_ipi_selftest_sent = armcpu_ipi_selftest_sent + 1;
+   if (gSpiIpi) { spiIpiSend (gDist, static_cast<uint32_t> ((aff >> 8) & 7)); return; }
+   __asm__ volatile ("dsb ishst; msr icc_sgi1r_el1, %0; isb" :: "r" (sgi) : "memory");
+ }
+@@ -975,8 +1096,13 @@
+   armcpu_quiesce_calls=armcpu_quiesce_calls+1;
+   if(diagnosePower)panic("ArmCpu: unsupported quiesce requested before timer/GIC disable caller=%p halt=%u timer=%llu phase=%u",__builtin_return_address(0),armcpu_halt_calls,armcpu_timer_interrupts,armcpu_irq_phase);
+   enableCPUTimeBase (false);
+-  uint64_t value = 0;
+-  __asm__ volatile ("msr icc_igrpen1_el1, %0; dsb sy; isb" :: "r" (value) : "memory");
++  if (gGicV2) {
++    if (gGicc != 0) { write32 (gGicc, 0x000, 0U); }
++    __asm__ volatile ("dsb sy; isb" ::: "memory");
++  } else {
++    uint64_t value = 0;
++    __asm__ volatile ("msr icc_igrpen1_el1, %0; dsb sy; isb" :: "r" (value) : "memory");
++  }
+ }
+ 
+ void ArmCpu::haltCPU (void)
+@@ -1052,12 +1178,16 @@
+   if (used >= ARMCPU_SPI_SLOTS) { return kIOReturnNoResources; }
+   const uint32_t word = (intid / 32) * 4, bit = 1U << (intid % 32);
+   write32 (gDist, 0x180 + word, bit); // ICENABLER while it is reconfigured
+-  if (!waitClear (gDist, 0, 1U << 31)) { return kIOReturnTimeout; }
++  if (!gGicV2 && !waitClear (gDist, 0, 1U << 31)) { return kIOReturnTimeout; }
+   write32 (gDist, 0x80 + word, read32 (gDist, 0x80 + word) | bit); // IGROUPR: group 1 (RAZ/WI if secure owns it)
+   *reinterpret_cast<volatile uint8_t *> (gDist + 0x400 + intid) = 0xa0;
+   const unsigned cfg = 0xc00 + (intid / 16) * 4, shift = (intid % 16) * 2 + 1;
+   write32 (gDist, cfg, (read32 (gDist, cfg) & ~(1U << shift)) | ((edge ? 1U : 0U) << shift));
+-  *reinterpret_cast<volatile uint64_t *> (gDist + 0x6000 + 8 * intid) = gBootAffinity;
++  if (gGicV2) {
++    *reinterpret_cast<volatile uint8_t *> (gDist + 0x800 + intid) = gGicV2BootTarget;
++  } else {
++    *reinterpret_cast<volatile uint64_t *> (gDist + 0x6000 + 8 * intid) = gBootAffinity;
++  }
+   gSpi[used] = {intid, handler, context, 0};
+   __atomic_store_n (&gSpiUsed, used + 1, __ATOMIC_RELEASE);
+   __atomic_fetch_or (&gSpiRoutes[intid], 1U << used, __ATOMIC_RELEASE);
+@@ -1068,7 +1198,10 @@
+                 (((read32 (gDist, cfg) >> shift) & 1U) << 2) |
+                 (static_cast<uint32_t> (*reinterpret_cast<volatile uint8_t *> (gDist + 0x400 + intid)) << 8);
+   }
+-  if (router != nullptr) { *router = *reinterpret_cast<volatile uint64_t *> (gDist + 0x6000 + 8 * intid); }
++  if (router != nullptr) {
++    *router = gGicV2 ? static_cast<uint64_t> (*reinterpret_cast<volatile uint8_t *> (gDist + 0x800 + intid))
++                     : *reinterpret_cast<volatile uint64_t *> (gDist + 0x6000 + 8 * intid);
++  }
+   return kIOReturnSuccess;
+ }
+ 
