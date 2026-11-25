@@ -88,8 +88,6 @@ constexpr uint32_t kErrorIntStatus  = 0x32;  // 16-bit
 constexpr uint32_t kNormalIntEnable = 0x34;  // 32-bit pair
 constexpr uint32_t kNormalIntSignal = 0x38;  // 32-bit pair
 constexpr uint32_t kHostControl2    = 0x3E;  // 16-bit
-constexpr uint32_t kCapabilities    = 0x40;  // 32-bit
-constexpr uint32_t kVersion         = 0xFE;  // 16-bit
 constexpr uint32_t kVendorSpecFunc  = 0x10C; // 32-bit Qualcomm CORE_VENDOR_SPEC
 
 // Qualcomm SDCC core_mem offsets (verified from stock Kenzo sdhci-msm binary).
