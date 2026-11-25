@@ -1,0 +1,146 @@
+name: Kenzo iPadOS 17.7.11 Data Seed
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  data-seed:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - name: Check out UniXNU
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: UniXNU/UniXNU
+          ref: c34f018aafd6befd5dc93c05a8dccd5bdce6724b
+          path: UniXNU
+          submodules: recursive
+
+      - name: Check out Kenzo device repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: device
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.13"
+
+      - name: Fetch iPadOS 17.7.11 OS DMG and build packed Data seed (.dbr)
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, plistlib, struct, subprocess, sys, urllib.request, zlib
+          from pathlib import Path
+
+          sys.path.insert(0, "UniXNU/scripts")
+          from unixnu.runtime import seed_uuid
+
+          IPSW_URL = "https://updates.cdn-apple.com/2025SpringFCS/fullrestores/122-77166/DCA6CFE8-90E9-4B92-880D-3DE171798E40/iPad_Pro_HFR_17.7.11_21H461_Restore.ipsw"
+          TARGET = "044-76040-038.dmg"
+          EXPECTED_SHA256 = "3f99b859c9728379110b66657c7b15285bcb1925ad8b5726542e2cdcf8b1028d"
+
+          def range_get(start, end):
+              req = urllib.request.Request(IPSW_URL, headers={"Range": f"bytes={start}-{end}"})
+              with urllib.request.urlopen(req, timeout=120) as r:
+                  return r.read()
+
+          req = urllib.request.Request(IPSW_URL, method="HEAD")
+          with urllib.request.urlopen(req, timeout=60) as r:
+              total = int(r.headers["Content-Length"])
+
+          tail = range_get(total - 65536, total - 1)
+          eocd = tail.rfind(b"PK\x05\x06")
+          cd_size, cd_off = struct.unpack_from("<II", tail, eocd + 12)
+          if cd_off == 0xFFFFFFFF or cd_size == 0xFFFFFFFF:
+              z64loc = tail.rfind(b"PK\x06\x07", 0, eocd)
+              z64_off, = struct.unpack_from("<Q", tail, z64loc + 8)
+              z64 = range_get(z64_off, z64_off + 56)
+              cd_size, cd_off = struct.unpack_from("<QQ", z64, 40)
+
+          cd = range_get(cd_off, cd_off + cd_size - 1)
+          pos = 0
+          entry = None
+          while pos < len(cd):
+              if cd[pos:pos+4] != b"PK\x01\x02":
+                  break
+              comp_method, _, _, _, comp_sz, uncomp_sz, nlen, elen, clen, _, _, _, lhoff = struct.unpack_from("<H4sIIIHHH2sHII", cd, pos + 10)
+              name = cd[pos+46:pos+46+nlen].decode("utf-8", "replace")
+              extra = cd[pos+46+nlen:pos+46+nlen+elen]
+              ep = 0
+              while ep + 4 <= len(extra):
+                  eid, esz = struct.unpack_from("<HH", extra, ep)
+                  if eid == 1:
+                      fp = ep + 4
+                      if uncomp_sz == 0xFFFFFFFF: uncomp_sz, = struct.unpack_from("<Q", extra, fp); fp += 8
+                      if comp_sz == 0xFFFFFFFF: comp_sz, = struct.unpack_from("<Q", extra, fp); fp += 8
+                      if lhoff == 0xFFFFFFFF: lhoff, = struct.unpack_from("<Q", extra, fp); fp += 8
+                  ep += 4 + esz
+              if name == TARGET:
+                  entry = (comp_method, comp_sz, uncomp_sz, lhoff)
+                  break
+              pos += 46 + nlen + elen + clen
+
+          assert entry is not None, f"{TARGET} not found in IPSW"
+          comp_method, comp_sz, uncomp_sz, lhoff = entry
+          lh = range_get(lhoff, lhoff + 30 + 256)
+          lnlen, lelen = struct.unpack_from("<HH", lh, 26)
+          data_start = lhoff + 30 + lnlen + lelen
+
+          dmg = Path("044-76040-038.dmg")
+          print(f"Downloading {TARGET} ({comp_sz >> 20} MiB, method={comp_method})...", flush=True)
+          h = hashlib.sha256()
+          chunk = 32 * 1024 * 1024
+          with dmg.open("wb") as out:
+              off = 0
+              while off < comp_sz:
+                  end = min(comp_sz, off + chunk) - 1
+                  buf = range_get(data_start + off, data_start + end)
+                  out.write(buf)
+                  h.update(buf)
+                  off += len(buf)
+          got_sha = h.hexdigest()
+          print(f"Downloaded {dmg}: {dmg.stat().st_size} bytes sha256={got_sha}", flush=True)
+          assert got_sha == EXPECTED_SHA256, f"SHA mismatch {got_sha}"
+
+          mount_dir = Path("/tmp/os_mount")
+          mount_dir.mkdir(exist_ok=True)
+          attached = plistlib.loads(subprocess.check_output(
+              ["hdiutil", "attach", "-readonly", "-nobrowse", "-noverify", "-noautofsck", "-mountpoint", str(mount_dir), "-plist", str(dmg)]
+          ))
+          dev = attached["system-entities"][0]["dev-entry"]
+          out_dbr = Path("scratch-data.img")
+          try:
+              subprocess.run(
+                  [sys.executable, "UniXNU/scripts/make-data-seed.py", str(mount_dir), str(out_dbr),
+                   "--gib", "3", "--build", "21H461", "--skip-setup"],
+                  check=True,
+              )
+          finally:
+              subprocess.run(["hdiutil", "detach", dev], check=False)
+
+          vol_uuid = seed_uuid(Path("UniXNU"), out_dbr)
+          meta = {
+              "file": str(out_dbr),
+              "bytes": out_dbr.stat().st_size,
+              "sha256": hashlib.sha256(out_dbr.read_bytes()).hexdigest(),
+              "volume_uuid": vol_uuid,
+              "gib": 3,
+              "build": "21H461",
+          }
+          Path("data-seed-meta.json").write_text(json.dumps(meta, indent=2) + "\n")
+          print("DATA_SEED_META:", json.dumps(meta), flush=True)
+          PY
+
+      - name: Upload packed Data seed artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: kenzo-ipados-17.7.11-data-seed
+          path: |
+            scratch-data.img
+            data-seed-meta.json
+          if-no-files-found: error
