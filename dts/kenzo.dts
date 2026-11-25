@@ -20,8 +20,8 @@
         sdhci: sdhci@7824900 {
             unixnu,adt-name = "sdhci";
             compatible = "unixnu,sdhci-block", "qcom,sdhci-msm";
-            reg = <0x07824900 0x500>;
-            interrupts = <0 0x7b 0>;
+            reg = <0x07824900 0x500>,
+                  <0x07824000 0x800>;
             status = "okay";
         };
     };

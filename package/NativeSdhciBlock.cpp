@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 //
 // NativeSdhciBlock - Qualcomm MSM8956 (Snapdragon 650 / Kenzo) SDHCI 3.0 eMMC
-// read-only block transport (0x07824900, mmc0).
+// read-only block transport (hc_mem 0x07824900, core_mem 0x07824000, mmc0).
 //
-// Inherits the live eMMC controller state initialized by LittleKernel aboot
-// (clocks, regulators, bus width, and card in TRAN state) and uses standard
-// SDHCI 3.0 polled PIO (Buffer Data Port 0x20) to avoid SMMU/DMA bring-up
-// hazards. Strictly read-only: write requests are refused.
+// Re-enables Qualcomm SDCC1 Host Controller mode (CORE_HC_MODE = 0x2001) after
+// LittleKernel aboot's target_uninit() (sdhci_mode_disable + mmc_put_card_to_sleep),
+// wakes the eMMC card from SLEEP -> STBY -> TRAN (with full JEDEC 1-bit DS
+// fallback), and reads via standard SDHCI 3.0 polled PIO (Buffer Data Port 0x20).
+// Strictly read-only: write requests are refused.
 
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IOLib.h>
@@ -28,6 +29,9 @@ volatile uint32_t native_sdhci_read_requests = 0;
 volatile uint32_t native_sdhci_read_failures = 0;
 volatile uint64_t native_sdhci_sectors = 0;
 volatile uint64_t native_sdhci_mmio_physical = 0;
+// Diagnostic words: [0]=(core_hc_before<<16)|core_hc_after, [1]=(clk<<16)|(pwr<<8)|hc1,
+// [2]=last_cmd_resp, [3]=(stage<<24)|(err<<16)|norm
+volatile uint32_t native_sdhci_diag[4] = {};
 }
 
 namespace {
@@ -53,17 +57,34 @@ constexpr uint32_t kNormalIntSignal = 0x38;  // 32-bit pair (0x38/0x3A)
 constexpr uint32_t kHostControl2    = 0x3E;  // 16-bit
 constexpr uint32_t kCapabilities    = 0x40;  // 32-bit
 constexpr uint32_t kVersion         = 0xFE;  // 16-bit
+constexpr uint32_t kVendorSpecFunc  = 0x10C; // 32-bit Qualcomm HC_VENDOR_SPECIFIC_FUNC
+
+// Qualcomm SDCC core_mem offsets (@ 0x07824000).
+constexpr uint32_t kCoreMciClk       = 0x04;
+constexpr uint32_t kCoreHcMode       = 0x78;
+constexpr uint32_t kCorePwrctlStatus = 0xDC;
+constexpr uint32_t kCorePwrctlClear  = 0xE0;
+constexpr uint32_t kCorePwrctlCtl    = 0xE8;
+
+constexpr uint32_t kHcModeEn         = 1U << 0;
+constexpr uint32_t kFfClkSwRstDis    = 1U << 13;
 
 constexpr uint32_t kPresentCmdInhibit  = 1U << 0;
 constexpr uint32_t kPresentDatInhibit  = 1U << 1;
+constexpr uint32_t kPresentDat0Level   = 1U << 20;
 constexpr uint16_t kIntCommandComplete = 1U << 0;
 constexpr uint16_t kIntTransferComplete = 1U << 1;
 constexpr uint16_t kIntBufferReadReady = 1U << 5;
 constexpr uint16_t kIntError           = 1U << 15;
 
-constexpr uint32_t kBlockBytes = 512;
-constexpr uint16_t kTrnsReadPio = 0x0010U;   // Data Transfer Direction = Read, DMA = 0 (PIO)
-constexpr uint16_t kCmdDataReadFlags = 0x003AU; // Data Present | Index | CRC | Resp 48-bit
+constexpr uint32_t kBlockBytes         = 512;
+constexpr uint16_t kTrnsReadPio        = 0x0010U; // Data Read, PIO (DMA = 0)
+constexpr uint16_t kCmdRespNone        = 0x0000U;
+constexpr uint16_t kCmdRespR2          = 0x0009U; // 136-bit + CRC
+constexpr uint16_t kCmdRespR3          = 0x0002U; // 48-bit (OCR, no CRC/idx)
+constexpr uint16_t kCmdRespR1          = 0x001AU; // 48-bit + CRC + Index
+constexpr uint16_t kCmdRespR1b         = 0x001BU; // 48-bit busy + CRC + Index
+constexpr uint16_t kCmdDataReadFlags   = 0x003AU; // Data Present | Index | CRC | Resp 48-bit
 
 bool compatibleContains(OSData *compatible, const char *needle)
 {
@@ -161,8 +182,10 @@ public:
 
 private:
     IOMemoryMap *mapping = nullptr;
+    IOMemoryMap *coreMapping = nullptr;
     IOLock *gate = nullptr;
     uintptr_t registers = 0;
+    uintptr_t coreRegs = 0;
     uint64_t capacity = 0;
     uint64_t partitionFirstLba = 0;
     uint64_t userdataFirstLba = 0;
@@ -200,9 +223,28 @@ private:
         *reinterpret_cast<volatile uint8_t *>(registers + offset) = value;
         __asm__ volatile("dsb oshst" ::: "memory");
     }
+    uint32_t coreRead32(uint32_t offset) const
+    {
+        return coreRegs ? *reinterpret_cast<volatile uint32_t *>(coreRegs + offset) : 0U;
+    }
+    void coreWrite32(uint32_t offset, uint32_t value)
+    {
+        if (!coreRegs) {
+            return;
+        }
+        *reinterpret_cast<volatile uint32_t *>(coreRegs + offset) = value;
+        __asm__ volatile("dsb oshst" ::: "memory");
+    }
 
+    void ackPwrctlIrq();
+    void enableQualcommHcMode();
+    void setClockDivider(uint16_t divider);
+    void ensureBusClockAndPower();
     void resetCmdDat();
     bool waitCommandIdle(uint32_t milliseconds);
+    bool sendCommand(uint32_t commandIndex, uint32_t argument, uint16_t flags, uint32_t *respOut);
+    bool wakeCardFromSleep();
+    bool reinitCardLegacy1Bit();
     bool dataCommandPio(uint32_t commandIndex, uint32_t argument);
     bool readSector(uint64_t emmcLba);
     bool readExtCsd();
@@ -227,9 +269,89 @@ IOService *NativeSdhciBlock::probe(IOService *provider, SInt32 *score)
     return IOBlockStorageDevice::probe(provider, score);
 }
 
+void NativeSdhciBlock::ackPwrctlIrq()
+{
+    if (!coreRegs) {
+        return;
+    }
+    const uint32_t st = coreRead32(kCorePwrctlStatus);
+    if (st != 0) {
+        coreWrite32(kCorePwrctlClear, st);
+        // Acknowledge bus power / IO switch success so SDHCI state machine proceeds.
+        uint32_t ctl = 0;
+        if (st & 0x03U) { // BUS_OFF | BUS_ON
+            ctl |= 0x01U;
+        }
+        if (st & 0x0CU) { // IO_LOW | IO_HIGH
+            ctl |= 0x02U;
+        }
+        if (ctl != 0) {
+            coreWrite32(kCorePwrctlCtl, ctl);
+        }
+    }
+}
+
+void NativeSdhciBlock::enableQualcommHcMode()
+{
+    if (!coreRegs) {
+        return;
+    }
+    const uint32_t before = coreRead32(kCoreHcMode);
+    const uint32_t mciClk = coreRead32(kCoreMciClk);
+    const uint32_t pwrSt = coreRead32(kCorePwrctlStatus);
+    ackPwrctlIrq();
+    coreWrite32(kCoreHcMode, kHcModeEn);
+    (void)coreRead32(kCoreHcMode);
+    coreWrite32(kCoreHcMode, kHcModeEn | kFfClkSwRstDis);
+    const uint32_t after = coreRead32(kCoreHcMode);
+    IODelay(1000);
+    native_sdhci_diag[0] = ((before & 0xFFFFU) << 16) | (after & 0xFFFFU);
+    IOLog("NativeSdhciBlock: core HC_MODE 0x%x->0x%x mci_clk=0x%x pwrctl=0x%x\n",
+          before, after, mciClk, pwrSt);
+}
+
+void NativeSdhciBlock::setClockDivider(uint16_t divider)
+{
+    // Disable SDCLK before changing divider.
+    write16(kClockControl, 0U);
+    IODelay(100);
+    const uint16_t clk = static_cast<uint16_t>(((divider & 0xFFU) << 8) |
+                                               (((divider >> 8) & 0x03U) << 6) | 0x0001U);
+    write16(kClockControl, clk);
+    for (uint32_t i = 0; i < 5000; ++i) {
+        if ((read16(kClockControl) & 0x0002U) != 0) {
+            break;
+        }
+        IODelay(10);
+    }
+    write16(kClockControl, static_cast<uint16_t>(clk | 0x0004U)); // SD_CLK_EN
+    IODelay(1000);
+}
+
+void NativeSdhciBlock::ensureBusClockAndPower()
+{
+    const uint8_t pwr = read8(kPowerControl);
+    if ((pwr & 0x01U) == 0) {
+        write8(kPowerControl, 0x0FU); // 3.3V + SD Bus Power ON
+        IODelay(2000);
+        ackPwrctlIrq();
+    }
+    uint16_t clk = read16(kClockControl);
+    if ((clk & 0x0005U) != 0x0005U) {
+        uint16_t div = static_cast<uint16_t>(((clk >> 8) & 0xFFU) | (((clk >> 6) & 0x03U) << 8));
+        if (div == 0) {
+            div = 4U; // Safe conservative divider
+        }
+        setClockDivider(div);
+    }
+    native_sdhci_diag[1] = (static_cast<uint32_t>(read16(kClockControl)) << 16) |
+                           (static_cast<uint32_t>(read8(kPowerControl)) << 8) |
+                           static_cast<uint32_t>(read8(kHostControl1));
+}
+
 void NativeSdhciBlock::resetCmdDat()
 {
-    write8(kSoftwareReset, 0x06U); // Reset CMD + DAT lines only (keep controller/clock/card alive)
+    write8(kSoftwareReset, 0x06U); // Reset CMD + DAT lines only
     for (uint32_t i = 0; i < 10000; ++i) {
         if ((read8(kSoftwareReset) & 0x06U) == 0) {
             break;
@@ -248,6 +370,164 @@ bool NativeSdhciBlock::waitCommandIdle(uint32_t milliseconds)
         IODelay(1000);
     }
     return false;
+}
+
+bool NativeSdhciBlock::sendCommand(uint32_t commandIndex, uint32_t argument, uint16_t flags, uint32_t *respOut)
+{
+    if (!ownsDevice || !registers) {
+        return false;
+    }
+    write32(kNormalIntSignal, 0U);
+    write32(kNormalIntEnable, 0xFFFFFFFFU);
+    write32(kNormalIntStatus, 0xFFFFFFFFU);
+    write8(kTimeoutControl, 0x0EU);
+
+    if (!waitCommandIdle(500)) {
+        resetCmdDat();
+        if (!waitCommandIdle(200)) {
+            return false;
+        }
+    }
+
+    write32(kArgument, argument);
+    write16(kTransferMode, 0U);
+    write16(kCommand, static_cast<uint16_t>(((commandIndex & 0x3FU) << 8) | (flags & 0x00FFU)));
+
+    uint16_t normStatus = 0;
+    uint16_t errStatus = 0;
+    bool cmdDone = false;
+    const bool isR1b = (flags == kCmdRespR1b);
+    bool busyDone = !isR1b;
+
+    for (uint32_t spin = 0; spin < 50000; ++spin) {
+        normStatus = read16(kNormalIntStatus);
+        if ((normStatus & kIntError) != 0) {
+            errStatus = read16(kErrorIntStatus);
+            break;
+        }
+        if (!cmdDone && (normStatus & kIntCommandComplete) != 0) {
+            cmdDone = true;
+            write16(kNormalIntStatus, kIntCommandComplete);
+        }
+        if (cmdDone && !busyDone) {
+            if ((normStatus & kIntTransferComplete) != 0 ||
+                (read32(kPresentState) & kPresentDat0Level) != 0) {
+                busyDone = true;
+                if ((normStatus & kIntTransferComplete) != 0) {
+                    write16(kNormalIntStatus, kIntTransferComplete);
+                }
+            }
+        }
+        if (cmdDone && busyDone) {
+            break;
+        }
+        IODelay(5);
+    }
+
+    const uint32_t resp = read32(kResponse);
+    write32(kNormalIntStatus, 0xFFFFFFFFU);
+    native_sdhci_diag[2] = resp;
+    native_sdhci_diag[3] = (commandIndex << 24) | (static_cast<uint32_t>(errStatus) << 16) | normStatus;
+
+    if (respOut) {
+        *respOut = resp;
+    }
+    if (errStatus != 0 || !cmdDone || !busyDone) {
+        resetCmdDat();
+        return false;
+    }
+    return true;
+}
+
+bool NativeSdhciBlock::wakeCardFromSleep()
+{
+    const uint32_t rcas[2] = {2U, 1U};
+    for (uint32_t rca : rcas) {
+        uint32_t resp = 0;
+        bool statusOk = sendCommand(13U, rca << 16, kCmdRespR1, &resp);
+        if (!statusOk) {
+            // Card is likely in SLEEP state (from LK mmc_put_card_to_sleep): send CMD5 AWAKE (bit 15 = 0).
+            uint32_t r5 = 0;
+            if (sendCommand(5U, rca << 16, kCmdRespR1b, &r5)) {
+                IOLog("NativeSdhciBlock: CMD5 AWAKE rca=%u resp=0x%08x\n", rca, r5);
+                IODelay(5000);
+                statusOk = sendCommand(13U, rca << 16, kCmdRespR1, &resp);
+            }
+        }
+        if (!statusOk) {
+            continue;
+        }
+        uint32_t state = (resp >> 9) & 0xFU;
+        if (state == 3U) { // STBY -> select card into TRAN
+            uint32_t r7 = 0;
+            if (sendCommand(7U, rca << 16, kCmdRespR1b, &r7)) {
+                IODelay(1000);
+                if (sendCommand(13U, rca << 16, kCmdRespR1, &resp)) {
+                    state = (resp >> 9) & 0xFU;
+                }
+            }
+        }
+        if (state == 4U) { // TRAN
+            IOLog("NativeSdhciBlock: woke eMMC rca=%u state=TRAN resp=0x%08x\n", rca, resp);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool NativeSdhciBlock::reinitCardLegacy1Bit()
+{
+    IOLog("NativeSdhciBlock: running clean JEDEC 1-bit DS eMMC init\n");
+    // Clear Qualcomm HS200/HS400 clock-mux override bits (HC_SELECT_IN [21:19], HC_SELECT_IN_EN [18]).
+    uint32_t vfunc = read32(kVendorSpecFunc);
+    vfunc &= ~(0xFU << 18);
+    write32(kVendorSpecFunc, vfunc);
+
+    // 1-bit bus, Default Speed (no HS200/HS400 DLL tuning needed).
+    write8(kHostControl1, 0x00U);
+    write16(kHostControl2, 0x0000U);
+    setClockDivider(0x00FFU); // ~400 kHz identification clock
+    resetCmdDat();
+
+    uint32_t resp = 0;
+    (void)sendCommand(0U, 0U, kCmdRespNone, nullptr);
+    IODelay(10000);
+
+    bool ocrReady = false;
+    for (uint32_t attempt = 0; attempt < 400; ++attempt) {
+        if (sendCommand(1U, 0x40FF8080U, kCmdRespR3, &resp) && (resp & 0x80000000U) != 0) {
+            ocrReady = true;
+            break;
+        }
+        IODelay(2000);
+    }
+    if (!ocrReady) {
+        IOLog("NativeSdhciBlock: CMD1 OCR timeout resp=0x%08x\n", resp);
+        return false;
+    }
+    if (!sendCommand(2U, 0U, kCmdRespR2, &resp)) {
+        IOLog("NativeSdhciBlock: CMD2 ALL_SEND_CID failed\n");
+        return false;
+    }
+    if (!sendCommand(3U, 2U << 16, kCmdRespR1, &resp)) {
+        IOLog("NativeSdhciBlock: CMD3 SET_RCA failed\n");
+        return false;
+    }
+    if (!sendCommand(7U, 2U << 16, kCmdRespR1b, &resp)) {
+        IOLog("NativeSdhciBlock: CMD7 SELECT_CARD failed\n");
+        return false;
+    }
+    (void)sendCommand(16U, kBlockBytes, kCmdRespR1, &resp);
+
+    // Bump to conservative ~12-25 MHz Default Speed clock for reliable PIO reads.
+    setClockDivider(0x0008U);
+    if (!sendCommand(13U, 2U << 16, kCmdRespR1, &resp) || (((resp >> 9) & 0xFU) != 4U)) {
+        IOLog("NativeSdhciBlock: post-init CMD13 failed resp=0x%08x\n", resp);
+        return false;
+    }
+    IOLog("NativeSdhciBlock: JEDEC 1-bit DS init OK resp=0x%08x clk=0x%04x\n",
+          resp, static_cast<unsigned>(read16(kClockControl)));
+    return true;
 }
 
 bool NativeSdhciBlock::dataCommandPio(uint32_t commandIndex, uint32_t argument)
@@ -307,6 +587,8 @@ bool NativeSdhciBlock::dataCommandPio(uint32_t commandIndex, uint32_t argument)
     const uint32_t resp = read32(kResponse);
     write32(kNormalIntStatus, 0xFFFFFFFFU);
     write32(kNormalIntSignal, 0U);
+    native_sdhci_diag[2] = resp;
+    native_sdhci_diag[3] = (commandIndex << 24) | (static_cast<uint32_t>(errStatus) << 16) | normStatus;
 
     if (errStatus != 0 || !bufRead || !xferDone) {
         IOLog("NativeSdhciBlock: cmd %u arg=0x%x fail norm=0x%04x err=0x%04x ps=0x%08x resp=0x%08x\n",
@@ -493,15 +775,24 @@ bool NativeSdhciBlock::start(IOService *provider)
     }
     mapping = provider->mapDeviceMemoryWithIndex(0, kIOMapAnywhere | kIOMapInhibitCache);
     if (!mapping || mapping->getLength() < 0x100) {
-        IOLog("NativeSdhciBlock: cannot map MMIO\n");
+        IOLog("NativeSdhciBlock: cannot map hc_mem MMIO\n");
         return false;
     }
     registers = static_cast<uintptr_t>(mapping->getVirtualAddress());
+    coreMapping = provider->mapDeviceMemoryWithIndex(1, kIOMapAnywhere | kIOMapInhibitCache);
+    if (coreMapping && coreMapping->getLength() >= 0x100) {
+        coreRegs = static_cast<uintptr_t>(coreMapping->getVirtualAddress());
+    }
     ownsDevice = true;
     native_sdhci_mmio_physical = mapping->getPhysicalAddress();
 
-    IOLog("NativeSdhciBlock: QCOM SDHCI phys=0x%llx CAP=0x%08x ver=0x%04x clk=0x%04x pwr=0x%02x hc=0x%02x hc2=0x%04x ps=0x%08x\n",
+    enableQualcommHcMode();
+    ensureBusClockAndPower();
+    resetCmdDat();
+
+    IOLog("NativeSdhciBlock: QCOM SDHCI phys=0x%llx core=0x%llx CAP=0x%08x ver=0x%04x clk=0x%04x pwr=0x%02x hc=0x%02x hc2=0x%04x ps=0x%08x\n",
           static_cast<uint64_t>(mapping->getPhysicalAddress()),
+          coreMapping ? static_cast<uint64_t>(coreMapping->getPhysicalAddress()) : 0ULL,
           read32(kCapabilities), static_cast<unsigned>(read16(kVersion)),
           static_cast<unsigned>(read16(kClockControl)), static_cast<unsigned>(read8(kPowerControl)),
           static_cast<unsigned>(read8(kHostControl1)), static_cast<unsigned>(read16(kHostControl2)),
@@ -512,7 +803,15 @@ bool NativeSdhciBlock::start(IOService *provider)
         return false;
     }
 
-    readExtCsd();
+    bool ready = wakeCardFromSleep();
+    bool extOk = ready && readExtCsd();
+    if (!extOk) {
+        // Fallback to clean JEDEC 1-bit Default Speed init (avoids HS200/HS400 DLL tuning).
+        if (reinitCardLegacy1Bit()) {
+            (void)readExtCsd();
+        }
+    }
+
     uint64_t entryLba = 0;
     uint32_t entryCount = 0, entrySize = 0;
     if (!readGptHeader(&entryLba, &entryCount, &entrySize) ||
@@ -569,6 +868,10 @@ void NativeSdhciBlock::stop(IOService *provider)
 
 void NativeSdhciBlock::free()
 {
+    if (coreMapping) {
+        coreMapping->release();
+        coreMapping = nullptr;
+    }
     if (mapping) {
         mapping->release();
         mapping = nullptr;
@@ -578,6 +881,7 @@ void NativeSdhciBlock::free()
         gate = nullptr;
     }
     registers = 0;
+    coreRegs = 0;
     ownsDevice = false;
     IOBlockStorageDevice::free();
 }
