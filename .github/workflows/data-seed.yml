@@ -68,7 +68,7 @@ jobs:
           while pos < len(cd):
               if cd[pos:pos+4] != b"PK\x01\x02":
                   break
-              comp_method, _, _, _, comp_sz, uncomp_sz, nlen, elen, clen, _, _, _, lhoff = struct.unpack_from("<H4sIIIHHH2sHII", cd, pos + 10)
+              comp_method, _, _, comp_sz, uncomp_sz, nlen, elen, clen, _, _, _, lhoff = struct.unpack_from("<H4sIIIHHH2sHII", cd, pos + 10)
               name = cd[pos+46:pos+46+nlen].decode("utf-8", "replace")
               extra = cd[pos+46+nlen:pos+46+nlen+elen]
               ep = 0
