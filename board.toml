@@ -76,7 +76,7 @@ text_fixups = [
   "com.apple.datamigrator,c270,fd7bbfa9fd030091,000080d2c0035fd6",
   "SystemAppMigrator,a64c,350a0094e0031caa3b0a0094,1f2003d5e0031caa1f2003d5",
 ]
-kernel_args = ["-v", "serial=3", "debug=0x144", "keepsyms=1", "smp=1", "armcpu-self-ipi=1", "sheng-pmgr=2", "no-lc=1", "panic_on_crash_disabled=1", "wdt=-1", "validation_disables=0x10", "sheng-disable-watchdogd=1", "sheng-lite=1", "sirius-skip-setup=1", "offline-legacy-gop=1", "offline-legacy-register=1", "offline-legacy-unit-scale=2", "offline-legacy-pm=1", "offline-legacy-phase=4", "offline-legacy-validate=1", "offline-legacy-transfer=1", "offline-legacy-retire=1", "offline-legacy-cpu-present=1", "sirius-fb-wc=1", "sirius-fb-cached=1", "offline-key-events=1", "aks=1", "aks-sls=3", "vsync=60", "sheng-vsync=60"]
+kernel_args = ["-v", "serial=3", "debug=0x144", "keepsyms=1", "smp=1", "armcpu-self-ipi=1", "sheng-pmgr=2", "no-lc=1", "panic_on_crash_disabled=1", "wdt=-1", "validation_disables=0x10", "memorystatus_log_level=3", "sheng-disable-watchdogd=1", "sheng-lite=1", "sirius-skip-setup=0", "offline-legacy-gop=1", "offline-legacy-register=1", "offline-legacy-unit-scale=2", "offline-legacy-pm=1", "offline-legacy-phase=4", "offline-legacy-validate=1", "offline-legacy-transfer=1", "offline-legacy-retire=1", "offline-legacy-cpu-present=1", "sirius-fb-wc=1", "sirius-fb-cached=1", "offline-key-events=1", "aks=1", "aks-sls=3", "vsync=60", "sheng-vsync=60"]
 
 [adt.product.string]
 artwork-display-gamut = "sRGB"
@@ -86,6 +86,7 @@ thin-bezel = 1
 
 [adt.defaults.u32]
 sleep-disabled = 1
+"kern.maxvnodes" = 16384
 
 [adt.buttons.string]
 compatible = "buttons"

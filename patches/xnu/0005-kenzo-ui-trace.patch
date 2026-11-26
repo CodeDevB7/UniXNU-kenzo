@@ -1,0 +1,26 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -1999,6 +1999,10 @@
+ 	p->p_acflag &= ~AFORK;
+ 
+ 	set_proc_name(imgp, p);
++	{
++		extern void kenzo_trace_exec(int, const char *);
++		kenzo_trace_exec(proc_getpid(p), p->p_name);
++	}
+ 
+ #if CONFIG_SECLUDED_MEMORY
+ 	if (secluded_for_apps &&
+--- a/bsd/kern/kern_exit.c
++++ b/bsd/kern/kern_exit.c
+@@ -1902,6 +1902,10 @@
+ 	boot_progress_exit(proc_getpid(p),p->p_name,rv,
+ 	    p->p_exit_reason ? p->p_exit_reason->osr_namespace : 0,
+ 	    p->p_exit_reason ? p->p_exit_reason->osr_code : 0);
++	extern void kenzo_trace_exit(int, const char *, int, unsigned, unsigned long long);
++	kenzo_trace_exit(proc_getpid(p), p->p_name, rv,
++	    p->p_exit_reason ? p->p_exit_reason->osr_namespace : 0,
++	    p->p_exit_reason ? p->p_exit_reason->osr_code : 0);
+ 
+ 	if (p->p_crash_behavior != 0 || p == initproc) {
+ 		proc_handle_critical_exit(p, rv);

@@ -13,6 +13,7 @@
 // Strictly read-only: write requests are refused.
 
 #include <IOKit/IOBSD.h>
+#include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/storage/IOBlockStorageDevice.h>
@@ -27,6 +28,7 @@
 #include <sys/types.h>
 
 extern "C" {
+extern void flush_dcache64(addr64_t addr, unsigned count, int phys);
 volatile uint32_t native_sdhci_ready = 0;
 volatile uint32_t native_sdhci_gpt_userdata = 0;
 volatile uint64_t native_sdhci_userdata_first = 0;
@@ -86,9 +88,11 @@ constexpr uint32_t kTimeoutControl  = 0x2E;  // 8-bit
 constexpr uint32_t kSoftwareReset   = 0x2F;  // 8-bit
 constexpr uint32_t kNormalIntStatus = 0x30;  // 16-bit (32-bit pair with 0x32)
 constexpr uint32_t kErrorIntStatus  = 0x32;  // 16-bit
-constexpr uint32_t kNormalIntEnable = 0x34;  // 32-bit pair
-constexpr uint32_t kNormalIntSignal = 0x38;  // 32-bit pair
+constexpr uint32_t kNormalIntEnable = 0x34;  // 32-bit pai
+constexpr uint32_t kNormalIntSignal = 0x38;  // 32-bit pai
 constexpr uint32_t kHostControl2    = 0x3E;  // 16-bit
+constexpr uint32_t kAdmaErrStatus   = 0x54;  // 8-bit
+constexpr uint32_t kAdmaSysAddr     = 0x58;  // 32-bit physical ADMA2 descriptor table address
 constexpr uint32_t kVendorSpecFunc  = 0x10C; // 32-bit Qualcomm CORE_VENDOR_SPEC
 
 // Qualcomm SDCC core_mem offsets (verified from stock Kenzo sdhci-msm binary).
@@ -114,6 +118,14 @@ constexpr uint32_t kMaxMultiSectors     = 128;
 constexpr uint32_t kBatchSectors        = 8; // 4 KiB writeBytes batching
 constexpr uint16_t kTrnsReadSinglePio   = 0x0010U; // Read, Single, PIO
 constexpr uint16_t kTrnsReadMultiPio    = 0x0036U; // Multi | Read | AutoCMD12 | BlkCntEn, PIO
+constexpr uint16_t kTrnsReadSingleDma   = 0x0011U; // Read, Single, DMA
+constexpr uint16_t kTrnsReadMultiDma    = 0x0037U; // Multi | Read | AutoCMD12 | BlkCntEn, DMA
+constexpr uint32_t kAdmaMaxBytes        = kBlockBytes * kMaxMultiSectors; // 64 KiB
+struct __attribute__((packed)) Adma2Desc32 {
+    uint16_t attr;
+    uint16_t length;
+    uint32_t address;
+};
 constexpr uint16_t kCmdRespNone         = 0x0000U;
 constexpr uint16_t kCmdRespR2           = 0x0009U;
 constexpr uint16_t kCmdRespR3           = 0x0002U;
@@ -246,6 +258,13 @@ private:
     bool online = false;
     bool ownsDevice = false;
     bool useMultiBlock = true;
+    bool useAdma2 = false;
+    IOBufferMemoryDescriptor *admaBufDesc = nullptr;
+    IOBufferMemoryDescriptor *admaTableDesc = nullptr;
+    uint8_t *admaBufVirt = nullptr;
+    Adma2Desc32 *admaTableVirt = nullptr;
+    uint64_t admaBufPhys = 0;
+    uint64_t admaTablePhys = 0;
     char windowName[33] = {};
     uint8_t windowSha256[32] = {};
     uint8_t sectorBuf[kBlockBytes] = {};
@@ -298,6 +317,8 @@ private:
     bool waitCommandIdle(uint32_t milliseconds);
     bool sendCommand(uint32_t commandIndex, uint32_t argument, uint16_t flags, uint32_t *respOut);
     bool reinitCardFallback(bool isSdCard);
+    void initAdma2Locked();
+    bool readAdma2Locked(uint64_t lba, uint32_t count);
     bool readSingleSectorLocked(uint64_t lba, uint8_t *dst512);
     bool readMultiSectorsToDescLocked(IOMemoryDescriptor *buffer, uint64_t byteOffset,
                                       uint64_t lba, uint32_t count);
@@ -903,6 +924,144 @@ bool NativeSdhciBlock::readMultiSectorsToDescLocked(IOMemoryDescriptor *buffer, 
     return true;
 }
 
+bool NativeSdhciBlock::readAdma2Locked(uint64_t lba, uint32_t count)
+{
+    if (!ownsDevice || !registers || !admaBufVirt || !admaTableVirt ||
+        count == 0 || count > kMaxMultiSectors || lba > 0xFFFFFFFFULL) {
+        return false;
+    }
+    const uint32_t bytes = count * kBlockBytes;
+    const uint32_t first = bytes > 32768U ? 32768U : bytes;
+    const uint32_t rem = bytes - first;
+    admaTableVirt[0].attr = rem ? 0x0021U : 0x0023U; // VALID | TRAN [| END]
+    admaTableVirt[0].length = static_cast<uint16_t>(first);
+    admaTableVirt[0].address = static_cast<uint32_t>(admaBufPhys);
+    if (rem) {
+        admaTableVirt[1].attr = 0x0023U; // VALID | END | TRAN
+        admaTableVirt[1].length = static_cast<uint16_t>(rem);
+        admaTableVirt[1].address = static_cast<uint32_t>(admaBufPhys + first);
+    }
+    flush_dcache64(reinterpret_cast<addr64_t>(admaTableVirt), 64U, FALSE);
+    flush_dcache64(reinterpret_cast<addr64_t>(admaBufVirt), bytes, FALSE);
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    write32(kNormalIntSignal, 0U);
+    write32(kNormalIntEnable, 0xFFFFFFFFU);
+    write32(kNormalIntStatus, 0xFFFFFFFFU);
+    (void)read32(kNormalIntStatus);
+    write8(kTimeoutControl, 0x0EU);
+
+    if (!waitCommandIdle(500)) {
+        resetCmdDat();
+        if (!waitCommandIdle(200)) {
+            return false;
+        }
+    }
+
+    const uint8_t hc1 = read8(kHostControl1);
+    write8(kHostControl1, static_cast<uint8_t>((hc1 & ~0x18U) | 0x10U)); // 32-bit ADMA2
+    write32(kAdmaSysAddr, static_cast<uint32_t>(admaTablePhys));
+    write16(kBlockSize, static_cast<uint16_t>(0x7000U | kBlockBytes));
+    write16(kBlockCount, static_cast<uint16_t>(count));
+    write32(kArgument, static_cast<uint32_t>(lba));
+    const uint32_t cmd = (count > 1U) ? 18U : 17U;
+    const uint16_t trns = (count > 1U) ? kTrnsReadMultiDma : kTrnsReadSingleDma;
+    write32(kTransferCmd, static_cast<uint32_t>(trns) |
+                          (static_cast<uint32_t>((cmd << 8) | kCmdDataReadFlags) << 16));
+
+    bool xferDone = false;
+    uint16_t errStatus = 0;
+    uint16_t normStatus = 0;
+    for (uint32_t spin = 0; spin < 2000000U; ++spin) {
+        normStatus = read16(kNormalIntStatus);
+        if ((normStatus & kIntError) != 0) {
+            errStatus = read16(kErrorIntStatus);
+            break;
+        }
+        if ((normStatus & kIntTransferComplete) != 0) {
+            write16(kNormalIntStatus, kIntTransferComplete);
+            xferDone = true;
+            break;
+        }
+        if (spin >= 256U && (spin & 0xFFU) == 0U) {
+            IODelay(1);
+        } else {
+            __asm__ volatile("yield");
+        }
+    }
+
+    const uint8_t admaErr = read8(kAdmaErrStatus);
+    write32(kNormalIntStatus, 0xFFFFFFFFU);
+    (void)read32(kNormalIntStatus);
+
+    if (errStatus != 0 || !xferDone) {
+        native_sdhci_diag[3] = (cmd << 24) | (static_cast<uint32_t>(errStatus) << 16) | normStatus;
+        IOLog("NativeSdhciBlock: ADMA2 err=0x%x norm=0x%x adma=0x%x lba=0x%llx cnt=%u\n",
+              errStatus, normStatus, admaErr, lba, count);
+        write8(kHostControl1, static_cast<uint8_t>(hc1 & ~0x18U));
+        resetCmdDat();
+        if (count > 1U) {
+            uint32_t stopResp = 0;
+            (void)sendCommand(12U, 0U, kCmdRespR1b, &stopResp);
+        }
+        return false;
+    }
+
+    flush_dcache64(reinterpret_cast<addr64_t>(admaBufVirt), bytes, FALSE);
+    __asm__ volatile("dsb sy" ::: "memory");
+    __atomic_fetch_add(&native_sdhci_read_requests, count, __ATOMIC_RELAXED);
+    return true;
+}
+
+void NativeSdhciBlock::initAdma2Locked()
+{
+    uint8_t pioRef[kBlockBytes] = {};
+    if (!readSingleSectorLocked(0, pioRef)) {
+        return;
+    }
+    admaBufDesc = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
+        kernel_task, kIODirectionInOut | kIOMemoryPhysicallyContiguous, kAdmaMaxBytes, 0xFFFFF000ULL);
+    admaTableDesc = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
+        kernel_task, kIODirectionInOut | kIOMemoryPhysicallyContiguous, 4096U, 0xFFFFF000ULL);
+    if (!admaBufDesc || !admaTableDesc) {
+        if (admaTableDesc) { admaTableDesc->release(); admaTableDesc = nullptr; }
+        if (admaBufDesc) { admaBufDesc->release(); admaBufDesc = nullptr; }
+        return;
+    }
+    if (admaBufDesc->prepare() != kIOReturnSuccess) {
+        admaTableDesc->release(); admaTableDesc = nullptr;
+        admaBufDesc->release(); admaBufDesc = nullptr;
+        return;
+    }
+    if (admaTableDesc->prepare() != kIOReturnSuccess) {
+        admaBufDesc->complete();
+        admaTableDesc->release(); admaTableDesc = nullptr;
+        admaBufDesc->release(); admaBufDesc = nullptr;
+        return;
+    }
+    IOByteCount bufSeg = 0, tblSeg = 0;
+    admaBufPhys = admaBufDesc->getPhysicalSegment(0, &bufSeg, kIOMemoryMapperNone);
+    admaTablePhys = admaTableDesc->getPhysicalSegment(0, &tblSeg, kIOMemoryMapperNone);
+    admaBufVirt = static_cast<uint8_t *>(admaBufDesc->getBytesNoCopy());
+    admaTableVirt = static_cast<Adma2Desc32 *>(admaTableDesc->getBytesNoCopy());
+    if (!admaBufVirt || !admaTableVirt || !admaBufPhys || !admaTablePhys ||
+        bufSeg < kAdmaMaxBytes || tblSeg < 64U ||
+        admaBufPhys + kAdmaMaxBytes > 0x100000000ULL ||
+        admaTablePhys + 64U > 0x100000000ULL) {
+        admaBufVirt = nullptr;
+        admaTableVirt = nullptr;
+        return;
+    }
+    memset(admaBufVirt, 0xA5, kBlockBytes);
+    if (readAdma2Locked(0, 1) && memcmp(pioRef, admaBufVirt, kBlockBytes) == 0) {
+        useAdma2 = true;
+        IOLog("NativeSdhciBlock: ADMA2 DMA verified OK (64 KiB bounce @ 0x%llx)\n", admaBufPhys);
+    } else {
+        useAdma2 = false;
+        IOLog("NativeSdhciBlock: ADMA2 self-test mismatch/error, staying on PIO\n");
+    }
+}
+
 bool NativeSdhciBlock::readBlocksToDescriptor(IOMemoryDescriptor *buffer, uint64_t lba,
                                               uint64_t count, uint64_t *actualOut)
 {
@@ -910,6 +1069,19 @@ bool NativeSdhciBlock::readBlocksToDescriptor(IOMemoryDescriptor *buffer, uint64
     IOLockLock(gate);
     while (doneBlocks < count) {
         const uint64_t remain = count - doneBlocks;
+        if (useAdma2) {
+            const uint32_t chunk = static_cast<uint32_t>(remain > kMaxMultiSectors ? kMaxMultiSectors : remain);
+            if (readAdma2Locked(lba + doneBlocks, chunk)) {
+                const uint64_t bytes = static_cast<uint64_t>(chunk) * kBlockBytes;
+                if (buffer->writeBytes(doneBlocks * kBlockBytes, admaBufVirt, bytes) != bytes) {
+                    break;
+                }
+                doneBlocks += chunk;
+                continue;
+            }
+            IOLog("NativeSdhciBlock: ADMA2 fallback to PIO at lba=0x%llx\n", lba + doneBlocks);
+            useAdma2 = false;
+        }
         if (useMultiBlock && remain >= 2) {
             const uint32_t chunk = static_cast<uint32_t>(remain > kMaxMultiSectors ? kMaxMultiSectors : remain);
             if (readMultiSectorsToDescLocked(buffer, doneBlocks * kBlockBytes, lba + doneBlocks, chunk)) {
@@ -1156,6 +1328,7 @@ bool NativeSdhciBlock::start(IOService *provider)
         }
     }
 
+    initAdma2Locked();
     online = true;
     native_sdhci_ready = 1;
     native_sdhci_sectors = capacity;
@@ -1220,6 +1393,18 @@ void NativeSdhciBlock::stop(IOService *provider)
 void NativeSdhciBlock::free()
 {
     if (!isWindowChild) {
+        if (admaTableDesc) {
+            admaTableDesc->complete();
+            admaTableDesc->release();
+            admaTableDesc = nullptr;
+        }
+        if (admaBufDesc) {
+            admaBufDesc->complete();
+            admaBufDesc->release();
+            admaBufDesc = nullptr;
+        }
+        admaBufVirt = nullptr;
+        admaTableVirt = nullptr;
         if (coreMapping) {
             coreMapping->release();
             coreMapping = nullptr;

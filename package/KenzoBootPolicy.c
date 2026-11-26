@@ -292,3 +292,33 @@ int kenzo_boot_policy(void *process, uint64_t scratch)
            error, disable_wdt == 1, lite == 1, skip_setup == 1);
     return error;
 }
+
+static int kenzo_is_ui_proc(const char *name)
+{
+    if (!name || !name[0]) {
+        return 0;
+    }
+    return strcmp(name, "SpringBoard") == 0 ||
+           strcmp(name, "backboardd") == 0 ||
+           strcmp(name, "Setup") == 0 ||
+           strcmp(name, "PosterBoard") == 0 ||
+           strcmp(name, "iconservicesagent") == 0 ||
+           strcmp(name, "com.apple.datamigrator") == 0 ||
+           strcmp(name, "datamigrator") == 0;
+}
+
+void kenzo_trace_exec(int pid, const char *name)
+{
+    if (kenzo_is_ui_proc(name)) {
+        printf("KENZO EXEC: pid=%d %s\n", pid, name);
+    }
+}
+
+void kenzo_trace_exit(int pid, const char *name, int rv, unsigned ns, unsigned long long code)
+{
+    const int sig = rv & 0x7f;
+    if (kenzo_is_ui_proc(name) || ns == 1U || (sig != 0 && sig != 0x7f)) {
+        printf("KENZO EXIT: pid=%d %s rv=0x%x sig=%d ns=%u code=0x%llx\n",
+               pid, (name && name[0]) ? name : "?", rv, sig, ns, code);
+    }
+}
