@@ -1,16 +1,19 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 //
 // KenzoDisplayProbe - Late registration & board glue for GopFramebuffer
-// (NativeLegacyDisplay + NativeGOPPresenter) and AppleKeyStoreState
-// (AppleKeyStore unlocked state) on Xiaomi Redmi Note 3 (MSM8956 / Kenzo).
+// (NativeLegacyDisplay + NativeGOPPresenter), IOSurface, and AppleKeyStoreState
+// (AppleKeyStore unlocked/no-passcode state) on Xiaomi Redmi Note 3 (MSM8956 / Kenzo).
 
 #include <IOKit/IODeviceMemory.h>
+#include <IOKit/IODeviceTreeSupport.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOPlatformExpert.h>
 #include <IOKit/IOService.h>
+#include <IOKit/IOUserClient.h>
 #include <libkern/c++/OSArray.h>
 #include <libkern/c++/OSData.h>
 #include <libkern/c++/OSDictionary.h>
+#include <libkern/c++/OSString.h>
 #include <libkern/c++/OSSymbol.h>
 #include <mach/kmod.h>
 #include <pexpert/pexpert.h>
@@ -34,6 +37,27 @@ volatile uint32_t kenzo_aks_ready = 0;
 volatile uint32_t kenzo_aks_calls = 0;
 volatile uint32_t kenzo_aks_opens = 0;
 
+static bool publishChosenWord(IORegistryEntry *entry, const char *key, uint32_t value)
+{
+    if (!entry || !key) {
+        return false;
+    }
+    OSObject *existing = entry->getProperty(key);
+    if (existing) {
+        OSData *data = OSDynamicCast(OSData, existing);
+        uint32_t current = 0;
+        if (!data || data->getLength() != sizeof(current)) {
+            return false;
+        }
+        memcpy(&current, data->getBytesNoCopy(), sizeof(current));
+        return current == value;
+    }
+    OSData *data = OSData::withBytes(&value, sizeof(value));
+    const bool ok = data && entry->setProperty(key, data);
+    OSSafeReleaseNULL(data);
+    return ok;
+}
+
 // --- NativeLegacyDisplay board callbacks ---
 __attribute__((noreturn)) void native_legacy_backend_guard(unsigned slot, void *self, void *caller)
 {
@@ -48,7 +72,22 @@ bool native_legacy_gop_mapping_observed(IOService *display, IOMemoryMap *mapping
           mapping ? static_cast<uint64_t>(mapping->getPhysicalAddress()) : 0ULL,
           mapping ? static_cast<uint64_t>(mapping->getLength()) : 0ULL,
           width, height, display);
-    return mapping != nullptr && width > 0 && height > 0;
+    if (!mapping || width == 0 || height == 0) {
+        return false;
+    }
+    unsigned scale = 2;
+    PE_parse_boot_argn("offline-legacy-unit-scale", &scale, sizeof(scale));
+    if (scale >= 1 && scale <= 3) {
+        IORegistryEntry *chosen = IORegistryEntry::fromPath("/chosen", gIODTPlane);
+        if (chosen) {
+            const bool sOk = publishChosenWord(chosen, "display-scale", scale);
+            const bool rOk = publishChosenWord(chosen, "display-rotation", 0U);
+            IOLog("KenzoDisplayProbe: /chosen display-scale=%u (%u) display-rotation=0 (%u)\n",
+                  scale, static_cast<unsigned>(sOk), static_cast<unsigned>(rOk));
+            chosen->release();
+        }
+    }
+    return true;
 }
 
 void native_legacy_registration_observed(IOService *display)
@@ -61,18 +100,30 @@ void native_legacy_swap_stage(unsigned) {}
 
 void native_legacy_client_enter(task_t, uint32_t) {}
 
-void native_legacy_client_observed(IOReturn result, IOUserClient *)
+void native_legacy_client_observed(IOReturn result, IOUserClient *client)
 {
     if (result == kIOReturnSuccess) {
-        __atomic_fetch_add(&kenzo_display_clients, 1U, __ATOMIC_RELAXED);
+        const uint32_t n = __atomic_add_fetch(&kenzo_display_clients, 1U, __ATOMIC_RELAXED);
+        IOLog("KenzoDisplayProbe: display client #%u opened (%s)\n",
+              n, client ? client->getMetaClass()->getClassName() : "null");
+    } else {
+        IOLog("KenzoDisplayProbe: display client open failed status=0x%x\n",
+              static_cast<unsigned>(result));
     }
 }
 
 void native_legacy_pm_observed(unsigned, IOReturn, unsigned long) {}
 
-void native_legacy_frame_observed(unsigned, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t)
+void native_legacy_frame_observed(unsigned kind, uint64_t count,
+                                  uint64_t minx, uint64_t miny, uint64_t maxx, uint64_t maxy)
 {
-    __atomic_fetch_add(&kenzo_display_frames, 1U, __ATOMIC_RELAXED);
+    const uint32_t n = __atomic_add_fetch(&kenzo_display_frames, 1U, __ATOMIC_RELAXED);
+    if (n <= 8U) {
+        IOLog("KenzoDisplayProbe: frame #%u kind=%u lit=%llu (%llu,%llu)-(%llu,%llu)\n",
+              n, kind, static_cast<unsigned long long>(count),
+              static_cast<unsigned long long>(minx), static_cast<unsigned long long>(miny),
+              static_cast<unsigned long long>(maxx), static_cast<unsigned long long>(maxy));
+    }
 }
 
 void native_legacy_frame_colors_observed(const uint32_t *, const uint64_t *, uint64_t) {}
@@ -117,7 +168,19 @@ void native_gpu_trace_record(uint32_t, uint32_t, const uint64_t *, uint32_t) {}
 
 // --- AppleKeyStoreState (NativeKeyStoreEvents) board callbacks ---
 bool native_aks_state_enabled(void) { return true; }
-uint32_t native_aks_lock_state(void) { return 0; } // Unlocked since boot
+
+uint32_t native_aks_lock_state(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        unsigned value = 3; // MobileKeyBag "no passcode" (unlocked since boot)
+        if (PE_parse_boot_argn("aks-sls", &value, sizeof(value)) && value > 7) {
+            value = 3;
+        }
+        cached = static_cast<int>(value);
+    }
+    return static_cast<uint32_t>(cached);
+}
 
 size_t native_aks_device_id(uint8_t *out, size_t capacity)
 {
@@ -162,8 +225,13 @@ static bool registerLateClass(void (*initFn)(void), const char *label)
     return true;
 }
 
-static void startKeyStore(IOService *platform)
+static void startKeyStore(void)
 {
+    IOService *resources = IOService::getResourceService();
+    if (!resources) {
+        IOLog("KenzoDisplayProbe: no IOResources for AppleKeyStore\n");
+        return;
+    }
     if (!registerLateClass(kenzo_keyevents_static_init, "AppleKeyStore")) {
         return;
     }
@@ -171,25 +239,27 @@ static void startKeyStore(IOService *platform)
     if (!aks) {
         return;
     }
-    if (!aks->init(nullptr) || !aks->attach(platform)) {
+    if (!aks->init(nullptr) || !aks->attach(resources)) {
         aks->release();
         return;
     }
-    if (!aks->start(platform)) {
-        aks->detach(platform);
+    if (!aks->start(resources)) {
+        aks->detach(resources);
         aks->release();
         return;
     }
     kenzo_aks_ready = 1;
-    IOLog("KenzoDisplayProbe: AppleKeyStore ready (unlocked state)\n");
+    IOLog("KenzoDisplayProbe: AppleKeyStore ready (sls=%u)\n", native_aks_lock_state());
 }
 
-static void startLegacyDisplay(IOService *platform)
+static void startLegacyDisplay(void)
 {
     kenzo_display_stage = 1;
-    const kern_return_t kr = OSKextLoadKextWithIdentifier("com.apple.iokit.IOMobileGraphicsFamily");
-    if (kr != KERN_SUCCESS) {
-        IOLog("KenzoDisplayProbe: IOMobileGraphicsFamily load failed (0x%x)\n", kr);
+
+    // 1. Load IOMobileGraphicsFamily and register NativeLegacyDisplay / NativeGOPPresenter.
+    const kern_return_t gfxKr = OSKextLoadKextWithIdentifier("com.apple.iokit.IOMobileGraphicsFamily");
+    if (gfxKr != KERN_SUCCESS) {
+        IOLog("KenzoDisplayProbe: IOMobileGraphicsFamily load failed (0x%x)\n", gfxKr);
         return;
     }
     kenzo_display_stage = 2;
@@ -198,39 +268,99 @@ static void startLegacyDisplay(IOService *platform)
     }
     (void)registerLateClass(kenzo_gop_presenter_static_init, "NativeGOPPresenter");
 
+    // 2. Load IOSurface and wait for IOCoreSurfaceRoot / IOSurfaceRoot (required by backboardd & SpringBoard).
+    const kern_return_t surfKr = OSKextLoadKextWithIdentifier("com.apple.iokit.IOSurface");
+    bool surfaceFound = false;
+    if (surfKr == KERN_SUCCESS) {
+        OSDictionary *matching = OSDictionary::withCapacity(1);
+        const OSObject *names[2] = {
+            OSString::withCString("IOCoreSurfaceRoot"),
+            OSString::withCString("IOSurfaceRoot")
+        };
+        OSArray *list = (names[0] && names[1]) ? OSArray::withObjects(names, 2) : nullptr;
+        if (!matching || !list || !matching->setObject(gIONameMatchKey, list)) {
+            OSSafeReleaseNULL(matching);
+        }
+        OSSafeReleaseNULL(list);
+        for (unsigned i = 0; i < 2; ++i) {
+            if (names[i]) {
+                names[i]->release();
+            }
+        }
+        IOService *surface = matching ? IOService::waitForMatchingService(matching, 5000000000ULL) : nullptr;
+        surfaceFound = (surface != nullptr);
+        OSSafeReleaseNULL(surface);
+        OSSafeReleaseNULL(matching);
+    }
+    IOLog("KenzoDisplayProbe: IOSurface load=0x%x root_found=%u\n",
+          static_cast<unsigned>(surfKr), static_cast<unsigned>(surfaceFound));
+    if (surfKr != KERN_SUCCESS || !surfaceFound) {
+        return;
+    }
+
+    // 3. Query UEFI GOP console geometry.
     PE_Video video = {};
     if (PE_current_console(&video) != 0 || !video.v_baseAddr || !video.v_width ||
-        !video.v_height || !video.v_rowBytes) {
+        !video.v_height || video.v_depth != 32 || video.v_rowBytes < video.v_width * 4) {
         IOLog("KenzoDisplayProbe: PE_current_console unavailable\n");
         return;
     }
 
+    // 4. Create NativeGOPFramebuffer nub under IOResources AND attach to IODeviceTree:/arm-io/gop-display
+    //    with device_type="display-subsystem" so IOMobileFramebuffer / backboardd / SpringBoard discover it!
+    IOService *parent = IOService::getResourceService();
     const uint64_t fbBytes = static_cast<uint64_t>(video.v_rowBytes) * static_cast<uint64_t>(video.v_height);
     IODeviceMemory *fbMem = IODeviceMemory::withRange(video.v_baseAddr, fbBytes);
-    const OSObject *memObjs[1] = { fbMem };
-    OSArray *memArray = fbMem ? OSArray::withObjects(memObjs, 1, 1) : nullptr;
+    OSArray *memArray = fbMem ? OSArray::withCapacity(1) : nullptr;
     IOService *gopNub = new IOService;
-    if (!fbMem || !memArray || !gopNub || !gopNub->init(nullptr)) {
+    if (!parent || !fbMem || !memArray || !gopNub || !gopNub->init(nullptr)) {
         OSSafeReleaseNULL(fbMem);
         OSSafeReleaseNULL(memArray);
         OSSafeReleaseNULL(gopNub);
         return;
     }
-    gopNub->setName("kenzo-gop-display");
+    memArray->setObject(fbMem);
     gopNub->setDeviceMemory(memArray);
+    gopNub->setName("NativeGOPFramebuffer");
     memArray->release();
     fbMem->release();
-    if (!gopNub->attach(platform)) {
+
+    if (!gopNub->attach(parent) || !gopNub->start(parent)) {
+        gopNub->detach(parent);
         gopNub->release();
         return;
     }
-    gopNub->registerService();
 
-    IOService *display = native_legacy_display_allocate();
-    if (!display) {
+    IORegistryEntry *armIo = IORegistryEntry::fromPath("/arm-io", gIODTPlane);
+    static const char kDisplayType[] = "display-subsystem";
+    OSData *typeData = OSData::withBytes(kDisplayType, sizeof(kDisplayType));
+    bool dtAttached = false;
+    if (armIo && typeData && gopNub->setProperty("device_type", typeData)) {
+        gopNub->setName("gop-display", gIODTPlane);
+        dtAttached = gopNub->attachToParent(armIo, gIODTPlane);
+    }
+    OSSafeReleaseNULL(typeData);
+    OSSafeReleaseNULL(armIo);
+    IOLog("KenzoDisplayProbe: /arm-io/gop-display device_type=display-subsystem dt_attached=%u\n",
+          static_cast<unsigned>(dtAttached));
+    if (!dtAttached) {
+        gopNub->stop(parent);
+        gopNub->detach(parent);
+        gopNub->release();
         return;
     }
-    if (!display->init(nullptr) || !display->attach(gopNub)) {
+
+    // 5. Probe, attach, and start NativeLegacyDisplay (phase 4 registers itself inside start()).
+    IOService *display = native_legacy_display_allocate();
+    if (!display || !display->init(nullptr)) {
+        OSSafeReleaseNULL(display);
+        return;
+    }
+    SInt32 score = 0;
+    const bool probeOk = (display->probe(gopNub, &score) == display);
+    if (!probeOk || !display->attach(gopNub)) {
+        IOLog("KenzoDisplayProbe: NativeLegacyDisplay probe/attach failed (probe=%u)\n",
+              static_cast<unsigned>(probeOk));
         display->release();
         return;
     }
@@ -241,11 +371,11 @@ static void startLegacyDisplay(IOService *platform)
         display->release();
         return;
     }
-    display->registerService();
-    IOLog("KenzoDisplayProbe: NativeLegacyDisplay online %lux%lu @ 0x%lx\n",
+    IOLog("KenzoDisplayProbe: NativeLegacyDisplay online %lux%lu @ 0x%lx (dt=%u)\n",
           static_cast<unsigned long>(video.v_width),
           static_cast<unsigned long>(video.v_height),
-          static_cast<unsigned long>(video.v_baseAddr));
+          static_cast<unsigned long>(video.v_baseAddr),
+          static_cast<unsigned>(dtAttached));
 }
 
 void native_legacy_display_late_probe(void)
@@ -254,13 +384,8 @@ void native_legacy_display_late_probe(void)
         return;
     }
     gKenzoDisplayProbed = true;
-    IOPlatformExpert *platform = IOService::getPlatform();
-    if (!platform) {
-        IOLog("KenzoDisplayProbe: no IOPlatformExpert\n");
-        return;
-    }
-    startKeyStore(platform);
-    startLegacyDisplay(platform);
+    startKeyStore();
+    startLegacyDisplay();
 }
 
 void native_legacy_display_probe(void)

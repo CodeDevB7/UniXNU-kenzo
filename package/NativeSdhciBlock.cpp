@@ -110,7 +110,8 @@ constexpr uint16_t kIntBufferReadReady  = 1U << 5;
 constexpr uint16_t kIntError            = 1U << 15;
 
 constexpr uint32_t kBlockBytes          = 512;
-constexpr uint32_t kMaxMultiSectors     = 64;
+constexpr uint32_t kMaxMultiSectors     = 128;
+constexpr uint32_t kBatchSectors        = 8; // 4 KiB writeBytes batching
 constexpr uint16_t kTrnsReadSinglePio   = 0x0010U; // Read, Single, PIO
 constexpr uint16_t kTrnsReadMultiPio    = 0x0036U; // Multi | Read | AutoCMD12 | BlkCntEn, PIO
 constexpr uint16_t kCmdRespNone         = 0x0000U;
@@ -248,6 +249,7 @@ private:
     char windowName[33] = {};
     uint8_t windowSha256[32] = {};
     uint8_t sectorBuf[kBlockBytes] = {};
+    uint8_t chunkBuf[kBlockBytes * kBatchSectors] = {};
     uint8_t manifestBlock[4096] = {};
 
     uint32_t read32(uint32_t offset) const
@@ -824,7 +826,7 @@ bool NativeSdhciBlock::readMultiSectorsToDescLocked(IOMemoryDescriptor *buffer, 
     write32(kNormalIntSignal, 0U);
     write32(kNormalIntEnable, 0xFFFFFFFFU);
     write32(kNormalIntStatus, 0xFFFFFFFFU);
-    IODelay(intClearDelayUs);
+    (void)read32(kNormalIntStatus);
     write8(kTimeoutControl, 0x0EU);
 
     if (!waitCommandIdle(500)) {
@@ -841,11 +843,13 @@ bool NativeSdhciBlock::readMultiSectorsToDescLocked(IOMemoryDescriptor *buffer, 
                           (static_cast<uint32_t>((18U << 8) | kCmdDataReadFlags) << 16));
 
     uint32_t done = 0;
+    uint32_t batchStart = 0;
+    uint32_t batchCount = 0;
     bool xferDone = false;
     uint16_t errStatus = 0;
     uint16_t normStatus = 0;
 
-    for (uint32_t spin = 0; spin < 500000; ++spin) {
+    for (uint32_t spin = 0; spin < 2000000; ++spin) {
         normStatus = read16(kNormalIntStatus);
         if ((normStatus & kIntError) != 0) {
             errStatus = read16(kErrorIntStatus);
@@ -853,28 +857,39 @@ bool NativeSdhciBlock::readMultiSectorsToDescLocked(IOMemoryDescriptor *buffer, 
         }
         if (done < count && (normStatus & kIntBufferReadReady) != 0) {
             write16(kNormalIntStatus, kIntBufferReadReady);
-            uint32_t *words = reinterpret_cast<uint32_t *>(sectorBuf);
+            uint32_t *words = reinterpret_cast<uint32_t *>(chunkBuf + batchCount * kBlockBytes);
             for (uint32_t w = 0; w < kBlockBytes / 4; ++w) {
                 words[w] = read32(kBufferPort);
             }
-            if (buffer->writeBytes(byteOffset + static_cast<uint64_t>(done) * kBlockBytes,
-                                   sectorBuf, kBlockBytes) != kBlockBytes) {
-                resetCmdDat();
-                return false;
-            }
             ++done;
+            ++batchCount;
+            if (batchCount == kBatchSectors || done == count) {
+                const uint64_t bytes = static_cast<uint64_t>(batchCount) * kBlockBytes;
+                if (buffer->writeBytes(byteOffset + static_cast<uint64_t>(batchStart) * kBlockBytes,
+                                       chunkBuf, bytes) != bytes) {
+                    resetCmdDat();
+                    return false;
+                }
+                batchStart = done;
+                batchCount = 0;
+            }
             spin = 0;
+            continue;
         }
         if (done == count && (normStatus & kIntTransferComplete) != 0) {
             write16(kNormalIntStatus, kIntTransferComplete);
             xferDone = true;
             break;
         }
-        IODelay(1);
+        if (spin >= 256U && (spin & 0xFFU) == 0U) {
+            IODelay(1);
+        } else {
+            __asm__ volatile("yield");
+        }
     }
 
     write32(kNormalIntStatus, 0xFFFFFFFFU);
-    IODelay(intClearDelayUs);
+    (void)read32(kNormalIntStatus);
 
     if (errStatus != 0 || done != count || !xferDone) {
         native_sdhci_diag[3] = (18U << 24) | (static_cast<uint32_t>(errStatus) << 16) | normStatus;
