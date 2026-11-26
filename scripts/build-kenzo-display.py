@@ -247,38 +247,168 @@ public:
         gop / "NativeGOPPresenter.o", gop_late,
     ])
 
-    # 4. Compile kits/kenzo/KenzoDisplayProbe.cpp
+    # 4. Compile kits/kenzo/KenzoDisplayProbe.cpp + board hardware drivers (Backlight, CpuFreq, TouchButtons)
+    #    and 207-slot NativeHidInput (late-staged IOHIDDevice)
     probe_src = ROOT / "kits/kenzo/KenzoDisplayProbe.cpp"
     require(probe_src.is_file(), f"Missing {probe_src}")
-    probe_obj = OUT / "KenzoDisplayProbe.o"
     rec = json.loads(
         (ROOT / "build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT/IOPlatformExpert.cpo.json")
         .read_text().strip().rstrip(",")
     )
-    cmd, i = [], 0
-    arguments = rec["arguments"]
-    while i < len(arguments):
-        val = arguments[i]
-        if val == rec["file"]:
-            cmd.append(str(probe_src))
-        elif val == "-o":
-            cmd += ["-o", str(probe_obj)]
-            i += 1
-        elif val in ("-MF", "-MJ", "-MT", "-MD", "-MP"):
-            if val in ("-MF", "-MJ", "-MT"):
+
+    def compile_iokit_cpp(src_path, obj_path, extra_includes=()):
+        cmd, i = [], 0
+        arguments = rec["arguments"]
+        while i < len(arguments):
+            val = arguments[i]
+            if val == rec["file"]:
+                cmd.append(str(src_path))
+            elif val == "-o":
+                cmd += ["-o", str(obj_path)]
                 i += 1
-        elif val == "-Xclang" and arguments[i + 1].startswith("-W"):
+            elif val in ("-MF", "-MJ", "-MT", "-MD", "-MP"):
+                if val in ("-MF", "-MJ", "-MT"):
+                    i += 1
+            elif val == "-Xclang" and arguments[i + 1].startswith("-W"):
+                i += 1
+            elif not val.startswith("-W"):
+                cmd.append(val)
             i += 1
-        elif not val.startswith("-W"):
-            cmd.append(val)
-        i += 1
-    cmd += [
-        "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",
-        "-Wno-c99-designator", "-Wno-reorder-init-list",
-        "-Wno-deprecated-enum-enum-conversion", "-Wno-unnecessary-virtual-specifier",
-        "-I", str(ROOT / ".cache/xnu-work/osfmk"),
-    ]
-    run(cmd, cwd=rec["directory"])
+        cmd += [
+            "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",
+            "-Wno-c99-designator", "-Wno-reorder-init-list",
+            "-Wno-deprecated-enum-enum-conversion", "-Wno-unnecessary-virtual-specifier",
+            "-I", str(ROOT / ".cache/xnu-work/osfmk"),
+            "-I", str(ROOT / "kits/kenzo"),
+        ]
+        for inc in extra_includes:
+            cmd += ["-I", str(inc)]
+        run(cmd, cwd=rec["directory"])
+
+    probe_obj = OUT / "KenzoDisplayProbe.o"
+    compile_iokit_cpp(probe_src, probe_obj)
+
+    backlight_src = ROOT / "kits/kenzo/KenzoBacklight.cpp"
+    cpufreq_src = ROOT / "kits/kenzo/KenzoCpuFreq.cpp"
+    input_src = ROOT / "kits/kenzo/KenzoTouchButtons.cpp"
+    hid_src = ROOT / "kits/kenzo/KenzoHidInput.cpp"
+    hid_table_path = ROOT / "kits/kenzo/hid-input-bindings.json"
+    for req_p in (backlight_src, cpufreq_src, input_src, hid_src, hid_table_path):
+        require(req_p.is_file(), f"Missing {req_p}")
+
+    backlight_obj = OUT / "KenzoBacklight.o"
+    cpufreq_obj = OUT / "KenzoCpuFreq.o"
+    input_obj = OUT / "KenzoTouchButtons.o"
+    compile_iokit_cpp(backlight_src, backlight_obj)
+    compile_iokit_cpp(cpufreq_src, cpufreq_obj)
+    compile_iokit_cpp(input_src, input_obj)
+
+    # 4a. Build 207-slot NativeHidInput (late-staged against verified iPadOS 17.7.11 IOHIDDevice ABI)
+    hid_table = json.loads(hid_table_path.read_text())
+    hid_pure = hid_table["abstract_slots"]
+    hid_slots = [int(v, 16) for v in hid_table["slots"]]
+    require(len(hid_slots) == 207, f"Expected 207 IOHIDDevice vtable slots, got {len(hid_slots)}")
+    iohid_vptr = int(hid_table["iohid_vptr"], 16)
+    hid_inherited = hid_table.get("inherited_symbols", {})
+
+    hid_header = """// SPDX-License-Identifier: BSD-2-Clause-Patent
+#pragma once
+#include <IOKit/IOService.h>
+#include <IOKit/IOMemoryDescriptor.h>
+class IOHIDDevice : public IOService {
+ OSDeclareAbstractStructors(IOHIDDevice)
+ unsigned char originalPrivate[0xd0-sizeof(IOService)];
+public:
+ using IOService::setProperty;
+ IOReturn Dispatch(IORPC) override;
+ void free() override;
+ bool init(OSDictionary *properties=nullptr) override;
+ bool setProperty(const OSSymbol *,OSObject *) override;
+ bool willTerminate(IOService *,IOOptionBits) override;
+ IOReturn configureReport(IOReportChannelList *,IOReportConfigureAction,void *,void *) override;
+ IOReturn updateReport(IOReportChannelList *,IOReportUpdateAction,void *,void *) override;
+ bool start(IOService *) override;
+ void stop(IOService *) override;
+ bool handleOpen(IOService *,IOOptionBits,void *) override;
+ void handleClose(IOService *,IOOptionBits) override;
+ bool handleIsOpen(const IOService *) const override;
+ bool matchPropertyTable(OSDictionary *,SInt32 *) override;
+ IOReturn message(UInt32,IOService *,void *) override;
+ IOReturn newUserClient(task_t,void *,UInt32,OSDictionary *,IOUserClient **) override;
+"""
+    for hi in range(168, 207):
+        if hi == 171:
+            hid_header += " virtual OSString *newTransportString() const;\n"
+        elif hi == 173:
+            hid_header += " virtual OSString *newProductString() const;\n"
+        elif hi == 180:
+            hid_header += " virtual IOReturn newReportDescriptor(IOMemoryDescriptor **) const=0;\n"
+        elif hi == 181:
+            hid_header += " virtual IOReturn handleReport(IOMemoryDescriptor *,unsigned,IOOptionBits);\n"
+        else:
+            hid_header += f' virtual __attribute__((deprecated("Unqualified prototype"))) void opaque{hi}();\n'
+    hid_header += '};\nstatic_assert(sizeof(IOHIDDevice)==0xd0,"Original IOHIDDevice instance size");\n'
+    (OUT / "OriginalHidDeviceABI.h").write_text(hid_header)
+
+    hid_staged_src = OUT / "NativeHidInput.cpp"
+    shutil.copyfile(hid_src, hid_staged_src)
+    hid_obj = OUT / "NativeHidInput.o"
+    compile_iokit_cpp(hid_staged_src, hid_obj, extra_includes=(OUT,))
+
+    hraw = hid_obj.read_bytes()
+    himg = macho(hraw)
+    hst = next(p for c, p, _ in himg["commands"] if c == 2)
+    hsy, hcount, hstrings, _ = struct.unpack_from("<4I", hraw, hst + 8)
+    hsyms = []
+    for hi in range(hcount):
+        ix, kind, section, _, va = struct.unpack_from("<IBBHQ", hraw, hsy + hi * 16)
+        hsyms.append((hraw[hstrings + ix:hraw.index(b"\0", hstrings + ix)].decode(), va, kind))
+    hvt = next(va for name, va, _ in hsyms if name == "__ZTV14NativeHidInput")
+    hrelocs = {}
+    for seg in himg["segments"]:
+        for sec in seg["sections"]:
+            if sec["va"] <= hvt < sec["va"] + sec["size"]:
+                ro, rc = struct.unpack_from("<2I", hraw, sec["command_offset"] + 56)
+                for hi in range(rc):
+                    offset, bits = struct.unpack_from("<2I", hraw, ro + hi * 8)
+                    if (bits >> 27) & 1 and (bits >> 28) == 0 and ((bits >> 25) & 3) == 3:
+                        hrelocs[sec["va"] + offset] = hsyms[bits & 0xFFFFFF][0]
+    hcompiled = [hrelocs.get(hvt + 16 + hi * 8) for hi in range(207)]
+    require(all(hcompiled) and (hvt + 16 + 207 * 8) not in hrelocs, "Exact owned 207-entry IOHIDDevice vtable")
+
+    hid_bindings = {
+        "__ZN11IOHIDDeviceC2EPK11OSMetaClass": 0xFFFFFFF004AD94F8,
+        "__ZN11IOHIDDeviceD2Ev": 0xFFFFFFF004AD9518,
+        "__ZN11IOHIDDevice10gMetaClassE": 0xFFFFFFF006AE6FA0,
+        "__ZTV11IOHIDDevice": iohid_vptr - 16,
+    }
+    for hi, hname in enumerate(hcompiled):
+        if hname.startswith(("__ZN14NativeHidInput", "__ZNK14NativeHidInput")):
+            pass
+        elif "11IOHIDDevice" in hname:
+            require(hi not in hid_pure, f"Unresolved abstract HID slot {hi}")
+            hid_bindings[hname] = hid_slots[hi]
+        else:
+            require(hi < 168, f"Unexpected non-HID symbol {hname} at slot {hi}")
+            if str(hi) in hid_inherited and hid_inherited[str(hi)]:
+                require(hname in hid_inherited[str(hi)], f"Inherited HID slot {hi} mismatch: {hname}")
+    hundef = {n for n, _, k in hsyms if k == 1 and "11IOHIDDevice" in n}
+    hmiss = hundef - set(hid_bindings)
+    require(not hmiss, f"Unbound IOHIDDevice symbols: {sorted(hmiss)}")
+
+    hasm = OUT / "hid-original-bindings.S"
+    hasm.write_text("".join(f".globl {n}\n.set {n}, {va:#x}\n" for n, va in sorted(hid_bindings.items())))
+    run(["xcrun", "clang", "-target", TRIPLE, "-isysroot", sdk, "-c", hasm, "-o", OUT / "hid-original-bindings.o"])
+
+    hid_late = OUT / "NativeHidInput.late.o"
+    run([
+        objcopy,
+        "--remove-section=__DATA,__mod_init_func",
+        "--globalize-symbol=__GLOBAL__sub_I_NativeHidInput.cpp",
+        hid_obj, hid_late,
+    ])
+    require(text_section(hraw, himg) == text_section(hid_late.read_bytes(), macho(hid_late.read_bytes())),
+            "NativeHidInput __text unchanged by late-init staging")
 
     # 4b. Compile kits/kenzo/KenzoBootPolicy.c against BSD kern_exec ABI
     policy_src = ROOT / "kits/kenzo/KenzoBootPolicy.c"
@@ -313,7 +443,9 @@ public:
     archive.unlink(missing_ok=True)
     run([
         "xcrun", "ar", "rcs", archive,
-        late, OUT / "original-bindings.o", probe_obj, policy_obj, keyevents_late, gop_late,
+        late, OUT / "original-bindings.o", probe_obj, policy_obj,
+        backlight_obj, cpufreq_obj, input_obj, hid_late, OUT / "hid-original-bindings.o",
+        keyevents_late, gop_late,
     ])
 
     sources = [
@@ -324,7 +456,12 @@ public:
         ROOT / "drivers/AppleKeyStoreState/NativeKeyStoreEvents.cpp",
         probe_src,
         policy_src,
+        backlight_src,
+        cpufreq_src,
+        input_src,
+        hid_src,
         table_path,
+        hid_table_path,
     ]
     report = {
         "source_sha256": {str(p.relative_to(ROOT)): sha(p) for p in sources},

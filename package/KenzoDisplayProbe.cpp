@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 //
-// KenzoDisplayProbe - Late registration & board glue for GopFramebuffer
+// KenzoDisplayProbe - Late registration & board glue for GopFramebuffe
 // (NativeLegacyDisplay + NativeGOPPresenter), IOSurface, and AppleKeyStoreState
 // (AppleKeyStore unlocked/no-passcode state) on Xiaomi Redmi Note 3 (MSM8956 / Kenzo).
 
@@ -28,6 +28,9 @@ void kenzo_gop_presenter_static_init(void) __asm__("__GLOBAL__sub_I_NativeGOPPre
 
 IOService *native_legacy_display_allocate(void);
 IOService *native_keyevents_allocate(void);
+void kenzo_cpufreq_run(void);
+void kenzo_backlight_start(void);
+void kenzo_input_start(void);
 
 // Observable telemetry for Kenzo Stage 3 bring-up.
 // kenzo_display_stage milestones (single hex digit on top bar):
@@ -424,8 +427,11 @@ void native_legacy_display_late_probe(void)
         return;
     }
     gKenzoDisplayProbed = true;
+    kenzo_cpufreq_run();
     startKeyStore();
     startLegacyDisplay();
+    kenzo_backlight_start();
+    kenzo_input_start();
 }
 
 void native_legacy_display_probe(void)
