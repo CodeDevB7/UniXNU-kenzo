@@ -1019,10 +1019,12 @@ void NativeSdhciBlock::initAdma2Locked()
     if (!readSingleSectorLocked(0, pioRef)) {
         return;
     }
+    const IOOptionBits admaOpts = static_cast<IOOptionBits>(kIODirectionInOut) |
+                                  static_cast<IOOptionBits>(kIOMemoryPhysicallyContiguous);
     admaBufDesc = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
-        kernel_task, kIODirectionInOut | kIOMemoryPhysicallyContiguous, kAdmaMaxBytes, 0xFFFFF000ULL);
+        kernel_task, admaOpts, kAdmaMaxBytes, 0xFFFFF000ULL);
     admaTableDesc = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
-        kernel_task, kIODirectionInOut | kIOMemoryPhysicallyContiguous, 4096U, 0xFFFFF000ULL);
+        kernel_task, admaOpts, 4096U, 0xFFFFF000ULL);
     if (!admaBufDesc || !admaTableDesc) {
         if (admaTableDesc) { admaTableDesc->release(); admaTableDesc = nullptr; }
         if (admaBufDesc) { admaBufDesc->release(); admaBufDesc = nullptr; }
