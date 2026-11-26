@@ -280,12 +280,40 @@ public:
     ]
     run(cmd, cwd=rec["directory"])
 
+    # 4b. Compile kits/kenzo/KenzoBootPolicy.c against BSD kern_exec ABI
+    policy_src = ROOT / "kits/kenzo/KenzoBootPolicy.c"
+    require(policy_src.is_file(), f"Missing {policy_src}")
+    policy_obj = OUT / "KenzoBootPolicy.o"
+    prec = json.loads(
+        (ROOT / "build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/kern_exec.o.json")
+        .read_text().strip().rstrip(",")
+    )
+    pcmd, j = [], 0
+    pargs = prec["arguments"]
+    while j < len(pargs):
+        val = pargs[j]
+        if val == prec["file"]:
+            pcmd.append(str(policy_src))
+        elif val in ("-o", "-MF", "-MT", "-MJ"):
+            if val == "-o":
+                pcmd += ["-o", str(policy_obj)]
+            j += 1
+        elif val in ("-MD", "-MP"):
+            pass
+        elif val == "-Xclang" and pargs[j + 1].startswith("-W"):
+            j += 1
+        elif not val.startswith("-W"):
+            pcmd.append(val)
+        j += 1
+    pcmd += ["-mgeneral-regs-only", "-Wall", "-Wextra", "-Werror"]
+    run(pcmd, cwd=prec["directory"])
+
     # 5. Archive libNativeLegacyDisplay.late.a and emit build-report.json
     archive = OUT / "libNativeLegacyDisplay.late.a"
     archive.unlink(missing_ok=True)
     run([
         "xcrun", "ar", "rcs", archive,
-        late, OUT / "original-bindings.o", probe_obj, keyevents_late, gop_late,
+        late, OUT / "original-bindings.o", probe_obj, policy_obj, keyevents_late, gop_late,
     ])
 
     sources = [
@@ -295,6 +323,7 @@ public:
         ROOT / "drivers/GopFramebuffer/NativeGOPWire.h",
         ROOT / "drivers/AppleKeyStoreState/NativeKeyStoreEvents.cpp",
         probe_src,
+        policy_src,
         table_path,
     ]
     report = {

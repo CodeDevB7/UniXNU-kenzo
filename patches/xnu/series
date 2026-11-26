@@ -1,3 +1,4 @@
 0001-msm8956-6core-smp.patch
 0002-sdhci-block-personality.patch
 0003-kenzo-pmgr-hook.patch
+0004-kenzo-boot-policy.patch

@@ -1,0 +1,13 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7400,6 +7400,10 @@
+ 	int policy_error=sheng_boot_watchdog_policy(p, (uint64_t)scratch_addr);
+ 	if (policy_error) panic("sheng watchdog launch policy failed: %d", policy_error);
+ 	boot_progress_stage("temporary watchdog launch policy ready");
++#else
++	extern int kenzo_boot_policy(void *, uint64_t);
++	int policy_error = kenzo_boot_policy(p, (uint64_t)scratch_addr);
++	if (policy_error) printf("kenzo_boot_policy: warning err=%d\n", policy_error);
+ #endif
+ #endif
+ #if CONFIG_MEMORYSTATUS
