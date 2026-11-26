@@ -1,26 +1,42 @@
 # UniXNU Kenzo
 
-Initial format 2 device port for the Xiaomi Redmi Note 3 (`kenzo`, Qualcomm MSM8956 / Snapdragon 650).
+Format 2 device port for the **Xiaomi Redmi Note 3 (`kenzo`, Qualcomm MSM8956 / Snapdragon 650, 2 GiB RAM)** running **Darwin 23.6.0 / XNU + iPadOS 17.7.11 (`21H461`)**.
 
-The current milestone includes configuration/patch preflight, a successful GitHub Actions DTS-to-ADT build, and a successful macOS GitHub Actions kernel build for iPadOS 17.7.11. The connected device's live Android FDT now grounds the MSM8956 selector, CPU MPIDRs, GIC, UART and 2 GiB RAM window. UEFI firmware, payload and boot-image creation, and XNU device boot have not been verified.
+## Current Progress (Device-Verified on Physical `kenzo`)
 
-## Check the current configuration
+- **UEFI & Display Scanout (`CodeDevB7/uefi-kenzo`)**: PeilessSec EDK II boots via temporary `fastboot boot`, reconfigures MDP5 RGB0 to 1080×1920 32-bit `BGRX8888` GOP (`KenzoSimpleFbDxe`), decompresses KLZM FAT32 payloads into high DRAM (`0xA0000000`), and hands off to XNU via `DarwinBoot`.
+- **6-Core Heterogeneous SMP & Interrupts**: All 6/6 cores (4× Cortex-A53 + 2× Cortex-A72) online via PSCI `CPU_ON` with GICv2 Virtual Timer PPI 20 IRQs and cross-cluster SGI IPIs.
+- **Platform Power (`ApplePMGRNub`)**: `ShengPlatformPower` publishes `ApplePMGRNub` (`sheng-pmgr=2`) for AMFI.
+- **Storage & Root (`SHNGROOT` on microSD + RAM `Data`)**: `NativeSdhciBlock` runs `SDCC2` external microSD in 4-bit 50 MHz High-Speed mode, mounts `OS` + `SystemOS` (`SHNGROOT`), and leaves internal eMMC Android (`mmcblk0`) 100% untouched. `NativeRamBlock` provides a writable 3 GiB sparse `Data` volume at `/private/var`.
+- **iPadOS 17.7.11 Userland (`/sbin/launchd`)**: External TrustCaches load cleanly, 100% of the 3.07 GiB `dyld_shared_cache` passes 4K code-signature validation (`B0C45`), `Early boot complete` finishes with 90+ active daemons, `AppleKeyStore` answers userland calls, and `NativeLegacyDisplay` + `IOSurface` + `/arm-io/gop-display` bring-up is active toward `backboardd` / `SpringBoard` graphical presentation.
 
-From this repository, with the UniXNU checkout beside it:
+See [the porting record](porting.toml) and [the latest Stage 3 evidence](evidence/2026-11-26-ipados-17.7.11-launchd-springboard-bringup.md) for exact revisions and logs.
+
+## On-Screen Telemetry Status Bar (`Q E X N r w D C F K B`)
+
+All values on the top status bar are displayed in **hexadecimal (hex)** to monitor kernel & iPadOS boot progress in real time:
+
+- **`Q`** (6 digits): Number of read requests to **microSD** (`NativeSdhciBlock`).
+- **`E`** (2 digits): Number of **microSD read errors** (normally `00`).
+- **`X`** (3 digits): Number of **4K code-signature** blobs validated.
+- **`N`** (2 digits): Number of **active processes** in the kernel (`_nprocs`) — rises as `launchd` spawns iPadOS daemons.
+- **`r`** (4 digits): Number of **read** operations to the RAM `Data` disk (`/private/var`).
+- **`w`** (4 digits): Number of **write** operations to the RAM `Data` disk (`/private/var`).
+- **`D`** (1 digit): **`NativeLegacyDisplay`** driver stage (`4` = registered & online).
+- **`C`** (2 digits): Number of **userland graphics clients** (e.g. `backboardd` / `SpringBoard`) connected to the display.
+- **`F`** (3 digits): Number of **iPadOS graphical frames** rendered (`> 0` stops debug text and hands the screen over to iPadOS).
+- **`K`** (3 digits): Number of userland calls to **`AppleKeyStore`**.
+- **`B`** (4 digits, green): Total **MiB** hashed by code-signature validation (mainly `dyld_shared_cache`, e.g. `0C45` = 3,141 MiB).
+
+## Check Configuration & Build
+
+From this repository, with the `UniXNU` checkout beside it:
 
 ```sh
 bash scripts/package.sh --check --os ipados-17.7.11-21H461
 ```
 
-The command resolves dependencies, extracts the selected profile's IPSW inputs and checks configuration and patch resolution. See [the porting record](porting.toml) and [the latest preflight evidence](evidence/2026-11-12-package-check.md) for the exact revisions and limits.
+- **Kenzo DTS and ADT build** (GitHub Actions): compiles `dts/kenzo.dts` and generates `kenzo.adt`.
+- **Kenzo macOS kernel build** (GitHub Actions): compiles `kernel.macho` (`0` PAN instructions) and uploads redacted build logs.
 
-The **Kenzo DTS and ADT build** workflow compiles the board tree and generates an ADT on a macOS runner when DTS, feed or board inputs change. It uploads `kenzo.adt` for inspection. To compile the kernel on GitHub Actions, run **Kenzo macOS kernel build** under Actions. It builds only the kernel, uploads the `kernel.macho` artifact and stores redacted text logs. It does not upload IPSW inputs.
-
-## Outstanding work
-
-- Research found no public Kenzo/MSM8956 Mu-Silicium/EDK2 board package. The live Android FDT matches extracted QCDT DTB 0 at its MSM8956 MTP selector, and the boot-chain partition hashes are recorded, but SBL1/aboot/HYP release tags and a UEFI entry path remain unknown. The current DSC/FD paths are placeholders.
-- Reconcile the Android kernel memory map with UEFI-specific reservations and handoff before changing payload memory values.
-- Complete the board component selection and ADT inputs using measured hardware values.
-- Build kernel, firmware, payload and boot image, then record hardware results individually.
-
-The user reports repeatedly booting `boot.img` and `recovery.img` with `fastboot boot` on this device. The observed LK `aboot` binary also contains the message `fastboot boot command is not available`, so that string alone does not describe the device's actual behavior. A UEFI payload still needs a compatible boot-image wrapper and validation. Do not use `fastboot flash` for exploration.
+> **Note**: Always boot test images temporarily into RAM with `fastboot boot <image>`. Never use `fastboot flash`.
