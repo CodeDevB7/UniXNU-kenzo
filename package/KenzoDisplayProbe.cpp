@@ -139,13 +139,29 @@ void native_legacy_frame_observed(unsigned kind, uint64_t count,
 
 void native_legacy_frame_colors_observed(const uint32_t *, const uint64_t *, uint64_t) {}
 
-void native_legacy_swap_validation_observed(bool, unsigned, const void *, const void *) {}
+void native_legacy_swap_validation_observed(bool accepted, unsigned reason,
+                                            const void *request, const void *surface)
+{
+    static volatile uint32_t logged = 0;
+    if (!accepted && __atomic_add_fetch(&logged, 1U, __ATOMIC_RELAXED) <= 5U && request) {
+        const uint8_t *b = static_cast<const uint8_t *>(request);
+        uint32_t r0[4] = {}, r1[4] = {}, dims[2] = {};
+        memcpy(r0, b + 17, sizeof(r0));
+        memcpy(r1, b + 81, sizeof(r1));
+        memcpy(dims, b + 816, sizeof(dims));
+        IOLog("KenzoDisplayProbe: swap fallback reason=%u surf=%p r0=%u,%u,%u,%u r1=%u,%u,%u,%u dims=%ux%u\n",
+              reason, surface, r0[0], r0[1], r0[2], r0[3], r1[0], r1[1], r1[2], r1[3], dims[0], dims[1]);
+    }
+}
 
 void native_legacy_surface_rejected(uint64_t w, uint64_t h, uint32_t fmt, uint32_t planes,
                                     uint64_t stride, uint64_t alloc, uint64_t descLen)
 {
-    IOLog("KenzoDisplayProbe: surface rejected %llux%llu fmt=0x%x planes=%u stride=%llu alloc=%llu desc=%llu\n",
-          w, h, fmt, planes, stride, alloc, descLen);
+    static volatile uint32_t rejLogged = 0;
+    if (__atomic_add_fetch(&rejLogged, 1U, __ATOMIC_RELAXED) <= 5U) {
+        IOLog("KenzoDisplayProbe: surface info %llux%llu fmt=0x%x planes=%u stride=%llu alloc=%llu desc=%llu\n",
+              w, h, fmt, planes, stride, alloc, descLen);
+    }
 }
 
 bool native_legacy_prepare_scanout(void)
@@ -153,14 +169,22 @@ bool native_legacy_prepare_scanout(void)
     return true;
 }
 
-void native_legacy_transfer_observed(IOReturn, const void *, uint64_t) {}
+void native_legacy_transfer_observed(IOReturn status, const void *, uint64_t bytes)
+{
+    if (status == kIOReturnSuccess) {
+        const uint32_t n = __atomic_add_fetch(&kenzo_display_frames, 1U, __ATOMIC_RELAXED);
+        if (n <= 4U) {
+            IOLog("KenzoDisplayProbe: transfer #%u bytes=%llu\n", n, static_cast<unsigned long long>(bytes));
+        }
+    }
+}
 
 void native_legacy_copy_timing_observed(uint64_t, uint64_t) {}
 
 void native_legacy_retirement_observed(IOService *) {}
 
-// CPU copy to GOP framebuffer (no Adreno GPU hardware composition yet on MSM8956).
-bool native_legacy_gpu_offer(void *, IOMemoryDescriptor *, uint64_t, uint32_t, uint32_t, uint32_t)
+// CPU copy / portrait scaler to GOP framebuffer (no Adreno GPU hardware composition yet on MSM8956).
+bool native_legacy_gpu_offer(void *, IOMemoryDescriptor *, uint64_t, uint32_t, uint32_t)
 {
     return false;
 }
@@ -169,7 +193,8 @@ void native_legacy_gpu_fallback_observed(int) {}
 
 void native_legacy_vsync_observed(unsigned, unsigned) {}
 
-// Optional Adreno/DPU/GPU-trace weak_import stubs (keep CPU GOP scanout path cleanly linked).
+// Optional Adreno/DPU/GPU-trace/boot-progress weak_import stubs (keep CPU GOP scanout path cleanly linked).
+volatile unsigned boot_progress_panel_top = 0;
 bool native_adreno_fences(uint32_t *, uint32_t *) { return false; }
 bool native_adreno_fences_detail(uint32_t *, uint32_t *, uint32_t *) { return false; }
 uint32_t native_ufs_dpu_map(unsigned, const uint64_t *, unsigned) { return 0; }

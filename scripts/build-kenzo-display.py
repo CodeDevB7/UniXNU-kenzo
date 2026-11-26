@@ -144,7 +144,13 @@ public:
     header += '};\nstatic_assert(sizeof(IOMobileFramebufferLegacy)==0x18a0,"Actual original instance extent");\n'
     (OUT / "OriginalLegacyFramebufferABI.h").write_text(header)
 
-    # 2. Build NativeLegacyDisplay.o and bind exact 358-slot vtable
+    # 2. Stage Kenzo's portrait-scaling / multi-layer NativeLegacyDisplay.cpp and build 358-slot vtable
+    kenzo_disp = ROOT / "kits/kenzo/KenzoLegacyDisplay.cpp"
+    kenzo_req = ROOT / "kits/kenzo/KenzoLegacyRequest.h"
+    if kenzo_disp.is_file():
+        shutil.copyfile(kenzo_disp, ROOT / "drivers/GopFramebuffer/NativeLegacyDisplay.cpp")
+    if kenzo_req.is_file():
+        shutil.copyfile(kenzo_req, ROOT / "drivers/GopFramebuffer/NativeLegacyRequest.h")
     print(run(["python3", ROOT / "scripts/build-arm-driver.py", "NativeLegacyDisplay"], text=True), end="")
     obj = OUT / "NativeLegacyDisplay.o"
     raw = obj.read_bytes()
