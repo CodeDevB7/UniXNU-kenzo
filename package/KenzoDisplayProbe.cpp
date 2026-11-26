@@ -30,6 +30,17 @@ IOService *native_legacy_display_allocate(void);
 IOService *native_keyevents_allocate(void);
 
 // Observable telemetry for Kenzo Stage 3 bring-up.
+// kenzo_display_stage milestones (single hex digit on top bar):
+//   1 = enter startLegacyDisplay
+//   2 = IOMobileGraphicsFamily loaded & NativeLegacyDisplay registered
+//   3 = IOSurface checked
+//   4 = PE_current_console validated
+//   5 = NativeGOPFramebuffer nub attached & started
+//   6 = /arm-io/gop-display device_type=display-subsystem attached in gIODTPlane
+//   7 = NativeLegacyDisplay init/probe/attach succeeded
+//   8 = calling NativeLegacyDisplay::start()
+//   A = native_legacy_registration_observed() called
+//   B = NativeLegacyDisplay::start() returned true (100% online!)
 volatile uint32_t kenzo_display_stage = 0;
 volatile uint32_t kenzo_display_frames = 0;
 volatile uint32_t kenzo_display_clients = 0;
@@ -92,7 +103,7 @@ bool native_legacy_gop_mapping_observed(IOService *display, IOMemoryMap *mapping
 
 void native_legacy_registration_observed(IOService *display)
 {
-    kenzo_display_stage = 4;
+    kenzo_display_stage = 0xA;
     IOLog("KenzoDisplayProbe: NativeLegacyDisplay registered (%p)\n", display);
 }
 
@@ -268,25 +279,12 @@ static void startLegacyDisplay(void)
     }
     (void)registerLateClass(kenzo_gop_presenter_static_init, "NativeGOPPresenter");
 
-    // 2. Load IOSurface and wait for IOCoreSurfaceRoot / IOSurfaceRoot (required by backboardd & SpringBoard).
+    // 2. Load IOSurface and probe for IOCoreSurfaceRoot (non-fatal if still starting asynchronously,
+    //    since IOMobileFramebufferLegacy::start() itself calls waitForService("IOCoreSurfaceRoot")).
     const kern_return_t surfKr = OSKextLoadKextWithIdentifier("com.apple.iokit.IOSurface");
     bool surfaceFound = false;
     if (surfKr == KERN_SUCCESS) {
-        OSDictionary *matching = OSDictionary::withCapacity(1);
-        const OSObject *names[2] = {
-            OSString::withCString("IOCoreSurfaceRoot"),
-            OSString::withCString("IOSurfaceRoot")
-        };
-        OSArray *list = (names[0] && names[1]) ? OSArray::withObjects(names, 2) : nullptr;
-        if (!matching || !list || !matching->setObject(gIONameMatchKey, list)) {
-            OSSafeReleaseNULL(matching);
-        }
-        OSSafeReleaseNULL(list);
-        for (unsigned i = 0; i < 2; ++i) {
-            if (names[i]) {
-                names[i]->release();
-            }
-        }
+        OSDictionary *matching = IOService::nameMatching("IOCoreSurfaceRoot");
         IOService *surface = matching ? IOService::waitForMatchingService(matching, 5000000000ULL) : nullptr;
         surfaceFound = (surface != nullptr);
         OSSafeReleaseNULL(surface);
@@ -294,21 +292,27 @@ static void startLegacyDisplay(void)
     }
     IOLog("KenzoDisplayProbe: IOSurface load=0x%x root_found=%u\n",
           static_cast<unsigned>(surfKr), static_cast<unsigned>(surfaceFound));
-    if (surfKr != KERN_SUCCESS || !surfaceFound) {
-        return;
-    }
+    kenzo_display_stage = 3;
 
     // 3. Query UEFI GOP console geometry.
     PE_Video video = {};
     if (PE_current_console(&video) != 0 || !video.v_baseAddr || !video.v_width ||
-        !video.v_height || video.v_depth != 32 || video.v_rowBytes < video.v_width * 4) {
-        IOLog("KenzoDisplayProbe: PE_current_console unavailable\n");
+        !video.v_height || !video.v_rowBytes) {
+        IOLog("KenzoDisplayProbe: PE_current_console unavailable (base=0x%lx %lux%lu depth=%lu row=%lu disp=%lu)\n",
+              static_cast<unsigned long>(video.v_baseAddr), static_cast<unsigned long>(video.v_width),
+              static_cast<unsigned long>(video.v_height), static_cast<unsigned long>(video.v_depth),
+              static_cast<unsigned long>(video.v_rowBytes), static_cast<unsigned long>(video.v_display));
         return;
     }
+    kenzo_display_stage = 4;
 
-    // 4. Create NativeGOPFramebuffer nub under IOResources AND attach to IODeviceTree:/arm-io/gop-display
-    //    with device_type="display-subsystem" so IOMobileFramebuffer / backboardd / SpringBoard discover it!
+    // 4. Create NativeGOPFramebuffer nub under IOResources (fallback to IOPlatformExpert)
+    //    AND attach to IODeviceTree:/arm-io/gop-display with device_type="display-subsystem"
+    //    so IOMobileFramebuffer / backboardd / SpringBoard discover the display!
     IOService *parent = IOService::getResourceService();
+    if (!parent) {
+        parent = IOService::getPlatform();
+    }
     const uint64_t fbBytes = static_cast<uint64_t>(video.v_rowBytes) * static_cast<uint64_t>(video.v_height);
     IODeviceMemory *fbMem = IODeviceMemory::withRange(video.v_baseAddr, fbBytes);
     OSArray *memArray = fbMem ? OSArray::withCapacity(1) : nullptr;
@@ -325,11 +329,21 @@ static void startLegacyDisplay(void)
     memArray->release();
     fbMem->release();
 
-    if (!gopNub->attach(parent) || !gopNub->start(parent)) {
+    bool nubStarted = gopNub->attach(parent) && gopNub->start(parent);
+    if (!nubStarted) {
         gopNub->detach(parent);
+        IOPlatformExpert *plat = IOService::getPlatform();
+        if (plat && plat != parent) {
+            parent = plat;
+            nubStarted = gopNub->attach(parent) && gopNub->start(parent);
+        }
+    }
+    if (!nubStarted) {
+        IOLog("KenzoDisplayProbe: gopNub attach/start failed\n");
         gopNub->release();
         return;
     }
+    kenzo_display_stage = 5;
 
     IORegistryEntry *armIo = IORegistryEntry::fromPath("/arm-io", gIODTPlane);
     static const char kDisplayType[] = "display-subsystem";
@@ -343,11 +357,8 @@ static void startLegacyDisplay(void)
     OSSafeReleaseNULL(armIo);
     IOLog("KenzoDisplayProbe: /arm-io/gop-display device_type=display-subsystem dt_attached=%u\n",
           static_cast<unsigned>(dtAttached));
-    if (!dtAttached) {
-        gopNub->stop(parent);
-        gopNub->detach(parent);
-        gopNub->release();
-        return;
+    if (dtAttached) {
+        kenzo_display_stage = 6;
     }
 
     // 5. Probe, attach, and start NativeLegacyDisplay (phase 4 registers itself inside start()).
@@ -364,18 +375,22 @@ static void startLegacyDisplay(void)
         display->release();
         return;
     }
-    kenzo_display_stage = 3;
+    kenzo_display_stage = 7;
+    kenzo_display_stage = 8;
     if (!display->start(gopNub)) {
         IOLog("KenzoDisplayProbe: NativeLegacyDisplay::start failed\n");
         display->detach(gopNub);
         display->release();
         return;
     }
-    IOLog("KenzoDisplayProbe: NativeLegacyDisplay online %lux%lu @ 0x%lx (dt=%u)\n",
+    kenzo_display_stage = 0xB;
+    gopNub->release();
+    IOLog("KenzoDisplayProbe: NativeLegacyDisplay online %lux%lu @ 0x%lx (dt=%u surf=%u)\n",
           static_cast<unsigned long>(video.v_width),
           static_cast<unsigned long>(video.v_height),
           static_cast<unsigned long>(video.v_baseAddr),
-          static_cast<unsigned>(dtAttached));
+          static_cast<unsigned>(dtAttached),
+          static_cast<unsigned>(surfaceFound));
 }
 
 void native_legacy_display_late_probe(void)
@@ -390,7 +405,9 @@ void native_legacy_display_late_probe(void)
 
 void native_legacy_display_probe(void)
 {
-    native_legacy_display_late_probe();
+    // Early bsd_init() hook runs before IOKitBSDInit() publishes IOBSD;
+    // IOSurfaceRoot requires IOResourceMatch="IOBSD", so defer all setup
+    // to native_legacy_display_late_probe() in bsd_autoconf().
 }
 
 } // extern "C"
