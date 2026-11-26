@@ -20,6 +20,7 @@
 #include "KenzoSpmi.h"
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IOLib.h>
+#include <IOKit/IOPlatformExpert.h>
 #include <IOKit/IOService.h>
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOWorkLoop.h>

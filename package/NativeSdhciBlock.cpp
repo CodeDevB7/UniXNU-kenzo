@@ -41,6 +41,7 @@ volatile uint64_t native_sdhci_window_base_lba = 0;
 volatile uint64_t native_sdhci_window_blocks = 0;
 volatile uint32_t native_sdhci_read_requests = 0;
 volatile uint32_t native_sdhci_read_failures = 0;
+volatile uint32_t native_sdhci_adma_active = 0;
 volatile uint64_t native_sdhci_sectors = 0;
 volatile uint64_t native_sdhci_mmio_physical = 0;
 volatile uint32_t native_sdhci_diag[4] = {};
@@ -1057,9 +1058,11 @@ void NativeSdhciBlock::initAdma2Locked()
     memset(admaBufVirt, 0xA5, kBlockBytes);
     if (readAdma2Locked(0, 1) && memcmp(pioRef, admaBufVirt, kBlockBytes) == 0) {
         useAdma2 = true;
+        native_sdhci_adma_active = 1U;
         IOLog("NativeSdhciBlock: ADMA2 DMA verified OK (64 KiB bounce @ 0x%llx)\n", admaBufPhys);
     } else {
         useAdma2 = false;
+        native_sdhci_adma_active = 0U;
         IOLog("NativeSdhciBlock: ADMA2 self-test mismatch/error, staying on PIO\n");
     }
 }
@@ -1083,6 +1086,7 @@ bool NativeSdhciBlock::readBlocksToDescriptor(IOMemoryDescriptor *buffer, uint64
             }
             IOLog("NativeSdhciBlock: ADMA2 fallback to PIO at lba=0x%llx\n", lba + doneBlocks);
             useAdma2 = false;
+            native_sdhci_adma_active = 0U;
         }
         if (useMultiBlock && remain >= 2) {
             const uint32_t chunk = static_cast<uint32_t>(remain > kMaxMultiSectors ? kMaxMultiSectors : remain);

@@ -26,9 +26,15 @@ static const char lite_jobs[] =
     "com.apple.photoanalysisd,com.apple.mediaanalysisd,com.apple.mediastream.mstreamd,com.apple.icloud.searchpartyd,"
     "com.apple.findmy.findmybeaconingd,com.apple.familycircled,com.apple.financed,com.apple.softwareupdateservicesd,"
     "com.apple.ndoagent,com.apple.biomesyncd,com.apple.email.maild,com.apple.amsengagementd,com.apple.adid,com.apple.eyereliefd,"
-    "com.apple.fairplayd.A2,com.apple.passd,com.apple.mobile.obliteration";
+    "com.apple.fairplayd.A2,com.apple.passd,com.apple.mobile.obliteration,"
+    "com.apple.analyticsd,com.apple.osanalytics.osanalyticshelper,com.apple.assistantd,com.apple.healthd,"
+    "com.apple.nfcd,com.apple.seld,com.apple.studentd,com.apple.softwareupdated,"
+    "com.apple.UARPUpdaterServiceUSBPD,com.apple.UARPUpdaterServiceAFU,"
+    "com.apple.UARPUpdaterServiceLegacyAudio,com.apple.UARPUpdaterServiceHID,"
+    "com.apple.PerfPowerServices,com.apple.PerfPowerTelemetryClientRegistrationService,"
+    "com.apple.Wallpaper.CollectionsPoster,com.apple.CollectionsPoster";
 
-static char policy[2048];
+static char policy[4096];
 static char extra_jobs[200];
 volatile int kenzo_boot_policy_status = -1;
 
@@ -317,6 +323,12 @@ void kenzo_trace_exec(int pid, const char *name)
 void kenzo_trace_exit(int pid, const char *name, int rv, unsigned ns, unsigned long long code)
 {
     const int sig = rv & 0x7f;
+    if (name && strcmp(name, "CollectionsPoster") == 0) {
+        static volatile unsigned posterExits = 0;
+        if (__atomic_add_fetch(&posterExits, 1U, __ATOMIC_RELAXED) > 3U) {
+            return;
+        }
+    }
     if (kenzo_is_ui_proc(name) || ns == 1U || (sig != 0 && sig != 0x7f)) {
         printf("KENZO EXIT: pid=%d %s rv=0x%x sig=%d ns=%u code=0x%llx\n",
                pid, (name && name[0]) ? name : "?", rv, sig, ns, code);

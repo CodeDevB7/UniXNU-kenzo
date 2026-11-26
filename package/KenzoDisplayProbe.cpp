@@ -50,6 +50,7 @@ volatile uint32_t kenzo_display_clients = 0;
 volatile uint32_t kenzo_aks_ready = 0;
 volatile uint32_t kenzo_aks_calls = 0;
 volatile uint32_t kenzo_aks_opens = 0;
+volatile uint32_t kenzo_con_state[8] = {};
 
 static bool publishChosenWord(IORegistryEntry *entry, const char *key, uint32_t value)
 {
@@ -118,8 +119,10 @@ void native_legacy_client_observed(IOReturn result, IOUserClient *client)
 {
     if (result == kIOReturnSuccess) {
         const uint32_t n = __atomic_add_fetch(&kenzo_display_clients, 1U, __ATOMIC_RELAXED);
-        IOLog("KenzoDisplayProbe: display client #%u opened (%s)\n",
-              n, client ? client->getMetaClass()->getClassName() : "null");
+        if (n <= 8U) {
+            IOLog("KenzoDisplayProbe: display client #%u opened (%s)\n",
+                  n, client ? client->getMetaClass()->getClassName() : "null");
+        }
     } else {
         IOLog("KenzoDisplayProbe: display client open failed status=0x%x\n",
               static_cast<unsigned>(result));
