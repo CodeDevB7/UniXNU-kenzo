@@ -96,6 +96,43 @@ static bool enableCbcr(uintptr_t gcc, uint32_t off)
     return false;
 }
 
+// Exact ARMv8 Qualcomm SCM call verified from stock Kenzo boot.img (0x34e2bc & 0x34ef90):
+//   SCM_SVC_MP (0x0C), CMD_RESTORE_SEC_CFG (0x02), arginfo=2 (2 VAL args),
+//   arg0=device_id (0x12 = gfx_iommu from extracted_dtb_0.dtb qcom,iommu-secure-id), arg1=spare (0).
+static int64_t qcomScmCall2(uint64_t fnId, uint64_t argInfo, uint64_t arg0, uint64_t arg1, uint64_t *r1Out)
+{
+    register uint64_t x0 __asm__("x0") = fnId;
+    register uint64_t x1 __asm__("x1") = argInfo;
+    register uint64_t x2 __asm__("x2") = arg0;
+    register uint64_t x3 __asm__("x3") = arg1;
+    register uint64_t x4 __asm__("x4") = 0;
+    register uint64_t x5 __asm__("x5") = 0;
+    register uint64_t x6 __asm__("x6") = 0;
+    for (unsigned retry = 0; retry < 32U; ++retry) {
+        __asm__ volatile("smc #0"
+                         : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4), "+r"(x5), "+r"(x6)
+                         :
+                         : "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+        if (x0 != 1ULL) { // 1 = SCM_INTERRUPTED
+            break;
+        }
+    }
+    if (r1Out) {
+        *r1Out = x1;
+    }
+    return static_cast<int64_t>(x0);
+}
+
+static int64_t qcomScmRestoreSecCfg(uint32_t devId, uint32_t spare, uint64_t *r1Out)
+{
+    // Try SMC64 STD call (0x42000C02) first, fallback to SMC32 STD call (0x02000C02) if unsupported (-1).
+    int64_t ret = qcomScmCall2(0x42000C02ULL, 2ULL, devId, spare, r1Out);
+    if (ret == -1LL || static_cast<uint32_t>(ret) == 0xFFFFFFFFU) {
+        ret = qcomScmCall2(0x02000C02ULL, 2ULL, devId, spare, r1Out);
+    }
+    return ret;
+}
+
 static uint64_t readAlwaysOn(uintptr_t gpu)
 {
     for (unsigned a = 0; a < 4U; ++a) {
@@ -274,15 +311,26 @@ extern "C" void kenzo_gpu_probe_run(void)
           (delta > 0ULL) ? "ALIVE" : "STUCK", rbbmSt,
           static_cast<unsigned long long>(delta));
 
-    // Gate #2: SMMUv2 Non-Secure Context Banks CB0 (0x8000) & CB2 (0xA000)
-    const uint32_t cb0Sctlr = rd32(smmu, 0x8000U);
-    const uint32_t cb2Sctlr = rd32(smmu, 0xA000U);
-    kenzo_gpu_probe_diag[5] = cb0Sctlr;
-    kenzo_gpu_probe_diag[6] = cb2Sctlr;
-    if (delta > 0ULL) {
-        kenzo_gpu_probe_state = 6U; // G6 = BOTH Gate #1 (Adreno 510 ALIVE) & Gate #2 (SMMU CB0/CB2) PASSED!
+    // Gate #2: Restore gfx_iommu (qcom,iommu-secure-id = 0x12) via TrustZone SCM before reading CB0/CB2!
+    // Without TZ_RESTORE_SEC_CFG(0x12, 0), CB0/CB2 stay secure-locked after oxili_cx GDSC power-up and fault EL1.
+    uint64_t scmR1 = 0;
+    const int64_t scmRet = qcomScmRestoreSecCfg(0x12U, 0U, &scmR1);
+    kenzo_gpu_probe_diag[7] = static_cast<uint32_t>(scmRet);
+    IOLog("KenzoGpuProbe: Gate2 SCM restore_sec_cfg(0x12) ret=%lld (0x%llx) r1=0x%llx\n",
+          static_cast<long long>(scmRet),
+          static_cast<unsigned long long>(scmRet),
+          static_cast<unsigned long long>(scmR1));
+
+    if (scmRet == 0LL) {
+        const uint32_t cb0Sctlr = rd32(smmu, 0x8000U);
+        const uint32_t cb2Sctlr = rd32(smmu, 0xA000U);
+        kenzo_gpu_probe_diag[5] = cb0Sctlr;
+        kenzo_gpu_probe_diag[6] = cb2Sctlr;
+        if (delta > 0ULL) {
+            kenzo_gpu_probe_state = 6U; // G6 = BOTH Gate #1 (Adreno 510 ALIVE) & Gate #2 (SMMU CB0/CB2) PASSED!
+        }
+        IOLog("KenzoGpuProbe: Gate2 SMMU CB0=0x%x CB2=0x%x\n", cb0Sctlr, cb2Sctlr);
     }
-    IOLog("KenzoGpuProbe: Gate2 SMMU CB0=0x%x CB2=0x%x\n", cb0Sctlr, cb2Sctlr);
 
     gccMap->release();
     gpuMap->release();
