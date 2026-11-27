@@ -1078,6 +1078,63 @@ void NativeSdhciBlock::initAdma2Locked()
         useAdma2 = true;
         native_sdhci_adma_active = 1U;
         IOLog("NativeSdhciBlock: ADMA2 DMA verified OK (64 KiB bounce @ 0x%llx)\n", admaBufPhys);
+
+        // Self-verifying SDCC2 microSD clock boost: GPLL0 (800 MHz) / 16 = 50 MHz RCG
+        // Try 25 MHz DS (SDHCI div=1) first, then 50 MHz HS (div=0 + HC1 HS bit); rollback cleanly on any mismatch.
+        if (isSdCardDevice) {
+            IODeviceMemory *gccMem = IODeviceMemory::withRange(0x01843000ULL, 0x1000ULL);
+            IOMemoryMap *gccMap = gccMem ? gccMem->map(kIOMapAnywhere | kIOMapInhibitCache) : nullptr;
+            if (gccMem) { gccMem->release(); }
+            if (gccMap) {
+                volatile uint32_t *cmdRcgr = reinterpret_cast<volatile uint32_t *>(gccMap->getVirtualAddress() + 0x04ULL);
+                volatile uint32_t *cfgRcgr = reinterpret_cast<volatile uint32_t *>(gccMap->getVirtualAddress() + 0x08ULL);
+                const uint32_t oldCfg = *cfgRcgr;
+                const uint16_t oldClk = read16(kClockControl);
+                const uint8_t  oldHc1 = read8(kHostControl1);
+
+                // Switch SDCC2 APPS RCG to GPLL0 (src=1) / 16 (hid_div=31 -> 0x11F) = 50.0 MHz
+                write16(kClockControl, 0U);
+                *cfgRcgr = 0x0000011FU;
+                __asm__ volatile("dsb sy" ::: "memory");
+                *cmdRcgr = *cmdRcgr | 1U;
+                __asm__ volatile("dsb sy" ::: "memory");
+                for (uint32_t i = 0; i < 5000U && (*cmdRcgr & 1U); ++i) { IODelay(1); }
+                setClockDivider(0x0001U); // 50 MHz / 2 = 25.0 MHz Default Speed (spec-safe for all SD cards)
+                IODelay(200);
+                memset(admaBufVirt, 0x5A, kBlockBytes);
+                if (readAdma2Locked(0, 1) && memcmp(pioRef, admaBufVirt, kBlockBytes) == 0) {
+                    native_sdhci_adma_active = 2U; // 25 MHz verified!
+                    IOLog("NativeSdhciBlock: SDCC2 boosted to 25.0 MHz ADMA2 OK\n");
+                    // Also try 50.0 MHz High-Speed (div=0 + HC1 BIT2) and verify LBA 0 byte-for-byte
+                    write8(kHostControl1, static_cast<uint8_t>(read8(kHostControl1) | 0x04U));
+                    setClockDivider(0x0000U); // 50.0 MHz
+                    IODelay(200);
+                    memset(admaBufVirt, 0x3C, kBlockBytes);
+                    if (readAdma2Locked(0, 1) && memcmp(pioRef, admaBufVirt, kBlockBytes) == 0) {
+                        native_sdhci_adma_active = 5U; // 50 MHz HS verified!
+                        IOLog("NativeSdhciBlock: SDCC2 boosted to 50.0 MHz HS ADMA2 OK\n");
+                    } else {
+                        write8(kHostControl1, static_cast<uint8_t>(read8(kHostControl1) & ~0x04U));
+                        setClockDivider(0x0001U); // stay at verified 25.0 MHz
+                        IODelay(200);
+                        IOLog("NativeSdhciBlock: 50 MHz self-test failed, staying on verified 25.0 MHz\n");
+                    }
+                } else {
+                    // Roll back cleanly to original 9.6 MHz XO clock
+                    write16(kClockControl, 0U);
+                    *cfgRcgr = oldCfg;
+                    __asm__ volatile("dsb sy" ::: "memory");
+                    *cmdRcgr = *cmdRcgr | 1U;
+                    __asm__ volatile("dsb sy" ::: "memory");
+                    for (uint32_t i = 0; i < 5000U && (*cmdRcgr & 1U); ++i) { IODelay(1); }
+                    write8(kHostControl1, oldHc1);
+                    write16(kClockControl, oldClk);
+                    IODelay(200);
+                    IOLog("NativeSdhciBlock: 25 MHz self-test failed, staying on 9.6 MHz\n");
+                }
+                gccMap->release();
+            }
+        }
     } else {
         useAdma2 = false;
         native_sdhci_adma_active = 0U;

@@ -165,8 +165,17 @@ static uint32_t readBuckMv(uint16_t ppid, uint8_t *typeOut = nullptr, uint8_t *s
 }
 
 // Verified SAW2 VCTL voltage ramp (disassembled from stock msm_spm_drv_set_vdd)
-static bool saw2SetVset(const char *tag, uint64_t sawPhys, uint8_t vset)
+static bool saw2SetVset(const char *tag, uint64_t sawPhys, uint8_t vset, uint32_t *mvOut = nullptr)
 {
+    if (sawPhys == kC1SawPhys) {
+        // Ensure A72 SPM/L2 VCTL clock enable bit (0x0B011210 BIT(1)) is active before SAW2 access
+        IOMemoryMap *spmClkMap = kenzo_spmi::mapPhys(0x0B011000ULL, 0x1000ULL);
+        if (spmClkMap) {
+            const uintptr_t sc = static_cast<uintptr_t>(spmClkMap->getVirtualAddress());
+            wr32(sc, 0x210U, rd32(sc, 0x210U) | 0x2U);
+            spmClkMap->release();
+        }
+    }
     IOMemoryMap *map = kenzo_spmi::mapPhys(sawPhys, 0x1000ULL);
     if (!map) {
         return false;
@@ -199,8 +208,24 @@ static bool saw2SetVset(const char *tag, uint64_t sawPhys, uint8_t vset)
         IOLog("KenzoCpuFreq: %s SAW2 VCTL vset=0x%02x timeout (sts=0x%x)\n", tag, vset, sts);
         return false;
     }
+    if (mvOut) {
+        *mvOut = 80U + static_cast<uint32_t>(sts & 0xFFU) * 5U;
+    }
     IODelay(350); // slew + FTS2.5 settle margin
     return true;
+}
+
+static uint32_t readSawMv(uint64_t sawPhys)
+{
+    IOMemoryMap *map = kenzo_spmi::mapPhys(sawPhys, 0x1000ULL);
+    if (!map) {
+        return 0;
+    }
+    const uintptr_t base = static_cast<uintptr_t>(map->getVirtualAddress());
+    const uint32_t sts = rd32(base, kSawPmicSts);
+    map->release();
+    const uint32_t vset = sts & 0xFFU;
+    return (vset >= 54U) ? (80U + vset * 5U) : 0U;
 }
 
 static bool reprogramClusterPll(const char *tag, uintptr_t muxBase, uintptr_t pllBase,
@@ -307,6 +332,9 @@ extern "C" void kenzo_cpufreq_run(void)
     uint8_t t0 = 0, s0 = 0, t1 = 0, s1 = 0;
     uint32_t c0Mv = readBuckMv(kPpidPm8950S5, &t0, &s0);
     uint32_t c1Mv = readBuckMv(kPpidPm8004S2, &t1, &s1);
+    if (c1Mv == 0U) {
+        c1Mv = readSawMv(kC1SawPhys);
+    }
     const uint32_t mxMv = readBuckMv(kPpidPm8950S6);
 
     kenzo_cpufreq_state[0] = mode;
@@ -321,13 +349,17 @@ extern "C" void kenzo_cpufreq_run(void)
           c0Khz, c0Cfg, c0L, c0St, c0Mv, t0, s0, c1Khz, c1Cfg, c1L, c1St, c1Mv, t1, s1, cciKhz, mxMv);
 
     if (mode >= 3U && mxMv >= 900U) {
-        // Full Stock Turbo: raise C0 & C1 rails via SAW2 VCTL to 1100 mV (0xCC), verify via SPMI Observer >= 1080 mV
-        if (c0Mv < 1080U && saw2SetVset("C0(A53)", kC0SawPhys, kVsetTurbo1100mV)) {
-            c0Mv = readBuckMv(kPpidPm8950S5);
+        // Full Stock Turbo: raise C0 & C1 rails via SAW2 VCTL to 1100 mV (0xCC), verify >= 1080 mV
+        uint32_t sawMv = 0;
+        if (c0Mv < 1080U && saw2SetVset("C0(A53)", kC0SawPhys, kVsetTurbo1100mV, &sawMv)) {
+            const uint32_t spmiMv = readBuckMv(kPpidPm8950S5);
+            c0Mv = spmiMv ? spmiMv : sawMv;
             kenzo_cpufreq_state[3] = c0Mv;
         }
-        if (c1Mv < 1080U && saw2SetVset("C1(A72)", kC1SawPhys, kVsetTurbo1100mV)) {
-            c1Mv = readBuckMv(kPpidPm8004S2);
+        sawMv = 0;
+        if (c1Mv < 1080U && saw2SetVset("C1(A72)", kC1SawPhys, kVsetTurbo1100mV, &sawMv)) {
+            const uint32_t spmiMv = readBuckMv(kPpidPm8004S2);
+            c1Mv = spmiMv ? spmiMv : sawMv;
             kenzo_cpufreq_state[4] = c1Mv;
         }
         if (c0Mv >= 1080U) {
@@ -355,6 +387,12 @@ extern "C" void kenzo_cpufreq_run(void)
         if (c1Khz < 1382400U && c1Mv >= 965U) {
             if (reprogramClusterPll("C1(A72)", c1Mux, c1Pll, 72U, 0x04E0405DU, 0x30001300U, 0x00100109U, true)) {
                 c1Khz = 1382400U;
+            }
+        }
+        // Never leave A72 parked at 19.2 MHz XO if HFPLL/buck failed: switch safely to 800 MHz GPLL0_AO
+        if (c1Khz < 800000U) {
+            if (switchMux(c1Mux, 4U, 1U)) {
+                c1Khz = 800000U;
             }
         }
     }

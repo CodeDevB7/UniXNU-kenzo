@@ -491,11 +491,18 @@ public:
                             }
                         }
                     } else if(layersCopied==0 && dstX==0 && dstY==0) {
-                        // Scaled full-frame landscape -> 90 deg CW portrait GOP.
+                        // Scaled full-frame landscape -> 90 deg CW portrait GOP (letterbox portrait splash lw<lh to preserve aspect!).
+                        const bool aspectFit=(lw<lh);
+                        const uint32_t fitW=aspectFit?(uint32_t)(((uint64_t)height*lw)/lh):width;
+                        const uint32_t padX=(width>fitW)?(width-fitW)/2U:0U;
                         for(uint32_t dy=0;dy<physH;++dy) {
-                            uint32_t sx=(uint32_t)(((uint64_t)dy*lw)/width);
-                            if(sx>=lw)sx=(uint32_t)lw-1;
                             volatile uint32_t *out32=reinterpret_cast<volatile uint32_t *>(dstBase+(uint64_t)dy*video.v_rowBytes);
+                            if(aspectFit && (dy<padX || dy>=padX+fitW)) {
+                                for(uint32_t dx=0;dx<physW;++dx)out32[dx]=0xFF000000U;
+                                continue;
+                            }
+                            uint32_t sx=aspectFit?(uint32_t)(((uint64_t)(dy-padX)*lw)/fitW):(uint32_t)(((uint64_t)dy*lw)/width);
+                            if(sx>=lw)sx=(uint32_t)lw-1;
                             for(uint32_t dx=0;dx<physW;++dx) {
                                 uint32_t sy=(uint32_t)(((uint64_t)(physW-1-dx)*lh)/height);
                                 if(sy>=lh)sy=(uint32_t)lh-1;

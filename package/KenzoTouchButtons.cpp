@@ -36,6 +36,7 @@ kern_return_t OSKextLoadKextWithIdentifier(const char *identifier);
 
 void kenzo_hid_input_static_init(void) __asm__("__GLOBAL__sub_I_NativeHidInput.cpp");
 IOService *native_hid_input_allocate(void);
+IOService *native_hid_touch_allocate(void);
 
 // Seqlock touch globals read by NativeHidInput.cpp (scaled to 0..30479 x 0..20319)
 volatile uint32_t native_touch_seq = 0;
@@ -512,7 +513,11 @@ void KenzoInputController::publishTouches()
     native_touch_count = count;
     __asm__ volatile("dmb ishst" ::: "memory");
     __atomic_store_n(&native_touch_seq, seq + 2U, __ATOMIC_RELEASE);
-    __atomic_fetch_add(&kenzo_touch_events, 1U, __ATOMIC_RELAXED);
+    const uint32_t evNum = __atomic_add_fetch(&kenzo_touch_events, 1U, __ATOMIC_RELAXED);
+    if (evNum <= 5U && count > 0U) {
+        IOLog("KenzoTouch: ev#%u cnt=%u hid=(%d,%d) rot=%u\n",
+              evNum, count, native_touch_xs[0], native_touch_ys[0], touchRot);
+    }
 
     void (*sink)(void *) = __atomic_load_n(&gTouchSink, __ATOMIC_ACQUIRE);
     if (sink) {
@@ -711,16 +716,31 @@ extern "C" void kenzo_input_start(void)
         IOLog("KenzoHidInput: kext load HIDFamily=0x%x EventDriver=0x%x\n",
               static_cast<unsigned>(kr1), static_cast<unsigned>(kr2));
         if (kr1 == KERN_SUCCESS && registerHidLateClass()) {
+            // 1. Combined keyboard/consumer buttons service (Power, VolUp, VolDown, Home)
             IOService *hid = native_hid_input_allocate();
             if (hid && hid->init(nullptr) && hid->attach(parent)) {
                 if (hid->start(parent)) {
                     hid->registerService();
-                    IOLog("KenzoHidInput: NativeHidInput registered\n");
+                    IOLog("KenzoHidInput: NativeHidInput (buttons) registered\n");
                 } else {
                     hid->detach(parent);
                 }
             }
             OSSafeReleaseNULL(hid);
+
+            // 2. Dedicated Built-In Digitizer/Touch Screen service so backboardd binds multitouch
+            if (tsEn == 1U) {
+                IOService *touchHid = native_hid_touch_allocate();
+                if (touchHid && touchHid->init(nullptr) && touchHid->attach(parent)) {
+                    if (touchHid->start(parent)) {
+                        touchHid->registerService();
+                        IOLog("KenzoHidInput: NativeHidInput (touch digitizer) registered\n");
+                    } else {
+                        touchHid->detach(parent);
+                    }
+                }
+                OSSafeReleaseNULL(touchHid);
+            }
         }
     }
 

@@ -83,8 +83,8 @@ static void install(IORegistryEntry *) {}
 #else
 enum {kSlots=256,kDispatch=198,kGetType=18,kGetInteger=23,kSetInteger=24,kGetFixed=25,kContacts=256};
 enum : uint32_t {kDigitizer=11,kX=0xB0000,kY=0xB0001,kIndex=0xB0005,kMask=0xB0007,kTouch=0xB0009,kMaskTouch=2,kFromEdgeTip=0x800};
-// 48 panel pixels of 3048 x 2032 (the sweet reference uses 48 px), in the driver's normalised IOFixed coordinates.
-static const int32_t kEdgeX=48*65536/3048,kEdgeY=48*65536/2032;
+// Generous edge zone (~6% = ~68 px on 1080p) so bottom Home-bar swipe catches easily on 5.5" Kenzo.
+static const int32_t kEdgeX=128*65536/3048,kEdgeY=128*65536/2032;
 #if __has_feature(ptrauth_calls)
 static void (*originalDispatch)(IOService *,OSObject *,IOOptionBits);
 #else
@@ -402,10 +402,8 @@ public:
         size_t size;
         if(touchOnly){size=sizeof(touchDescriptor);memcpy(combined,touchDescriptor,size);}
         else{
+            // Buttons/keyboard device keeps pure keyboard+consumer descriptor while separate touchOnly service owns Digitizer.
             size=sizeof(descriptor);memcpy(combined,descriptor,size);
-            // Default: one device, keyboard collection first, digitizer second (the arrangement whose event drive
-            // and user client attach on hardware); the separate digitizer device is the opt-in touch-split.
-            if(touchEnabled){memcpy(combined+size,touchDescriptor,sizeof(touchDescriptor));size+=sizeof(touchDescriptor);}
         }
         *out=IOBufferMemoryDescriptor::withBytes(combined,size,kIODirectionNone);
         return *out?kIOReturnSuccess:kIOReturnNoMemory;
@@ -453,7 +451,7 @@ public:
         // report's fingers as one digitizer collection with a child per finger. Without it a touch screen gets one event per finger,
         // and backboardd takes each as the whole touch set, so no two fingers are ever down together for UIKit (no pinch, no
         // multi-finger or system gestures).
-        if(touchOnly||touchEnabled){setProperty("Built-In",true);setProperty("DisplayIntegrated",true);setProperty("DigitizerCollectionDispatch",true);}
+        if(touchOnly){setProperty("Built-In",true);setProperty("DisplayIntegrated",true);setProperty("DigitizerCollectionDispatch",true);}
 #if defined(XNU_TARGET_OS_OSX) && XNU_TARGET_OS_OSX
         // macOS: WindowServer ties a digitizer to the display whose container ID equals the digitizer's kUSBContainerID (a UUID string,
         // read up the service plane as from a USB device); the built-in display publishes that ID in its EDID (NativeLegacyDisplay.cpp).
@@ -464,10 +462,11 @@ public:
         if(!timer || inputLoop->addEventSource(timer)!=kIOReturnSuccess) {
             OSSafeReleaseNULL(timer);IOHIDDevice::stop(provider);return false;
         }
-        if(touchOnly||touchEnabled) {
+        if(touchOnly){
             if(&native_touch_set_sink)native_touch_set_sink(&NativeHidInput::touchNotify,this);
+        } else {
+            if(&native_buttons_set_sink)native_buttons_set_sink(&NativeHidInput::buttonsNotify,this);
         }
-        if(!touchOnly && &native_buttons_set_sink)native_buttons_set_sink(&NativeHidInput::buttonsNotify,this);
         setProperty("OfflineInputProbe",true);
         native_hid_input_observed(2,0);
         timer->setTimeoutMS(1000);return true;
