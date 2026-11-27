@@ -492,17 +492,30 @@ extern "C" void kenzo_gpu_probe_run(void)
           static_cast<long long>(scmRet), static_cast<unsigned long long>(scmR1));
 
     if (mode == 3U && scmRet == 0LL) {
-        // Gate #2: SMMUv2 Non-Secure Context Banks CB0 (0x8000) & CB2 (0xA000)
-        uint64_t r1cb2 = 0;
-        (void)qcomScmRestoreSecCfg(0x12U, 2U, &r1cb2);
-        const uint32_t cb0Sctlr = rd32(smmu, 0x8000U);
-        const uint32_t cb2Sctlr = rd32(smmu, 0xA000U);
-        kenzo_gpu_probe_diag[5] = cb0Sctlr;
-        kenzo_gpu_probe_diag[6] = cb2Sctlr;
-        if (delta > 0ULL) {
-            kenzo_gpu_probe_state = 6U;
+        // Optional TZ IOMMU_SECURE_PTBL_SIZE (0x42000C03) query (kenzo-gpu-smmu-ptbl=1)
+        unsigned smmuPtbl = 0;
+        PE_parse_boot_argn("kenzo-gpu-smmu-ptbl", &smmuPtbl, sizeof(smmuPtbl));
+        if (smmuPtbl == 1U) {
+            uint64_t ptblSz = 0;
+            const int64_t ptblRet = qcomScmCall2(0x42000C03ULL, 1ULL, 0ULL, 0ULL, &ptblSz);
+            kenzo_gpu_probe_diag[5] = static_cast<uint32_t>(ptblSz);
+            kenzo_gpu_probe_diag[6] = static_cast<uint32_t>(ptblSz >> 16);
+            kenzo_gpu_probe_diag[7] = static_cast<uint32_t>(ptblRet);
+            IOLog("KenzoGpuProbe: SCM IOMMU_SECURE_PTBL_SIZE ret=%lld size=0x%llx\n",
+                  static_cast<long long>(ptblRet), static_cast<unsigned long long>(ptblSz));
+        } else {
+            // Gate #2: SMMUv2 Non-Secure Context Banks CB0 (0x8000) & CB2 (0xA000)
+            uint64_t r1cb2 = 0;
+            (void)qcomScmRestoreSecCfg(0x12U, 2U, &r1cb2);
+            const uint32_t cb0Sctlr = rd32(smmu, 0x8000U);
+            const uint32_t cb2Sctlr = rd32(smmu, 0xA000U);
+            kenzo_gpu_probe_diag[5] = cb0Sctlr;
+            kenzo_gpu_probe_diag[6] = cb2Sctlr;
+            if (delta > 0ULL) {
+                kenzo_gpu_probe_state = 6U;
+            }
+            IOLog("KenzoGpuProbe: Gate2 SMMU CB0=0x%x CB2=0x%x\n", cb0Sctlr, cb2Sctlr);
         }
-        IOLog("KenzoGpuProbe: Gate2 SMMU CB0=0x%x CB2=0x%x\n", cb0Sctlr, cb2Sctlr);
     } else if (mode == 4U && delta > 0ULL) {
         // Gate #3A: Test EL1 read/clear of RBBM_SECVID_TRUST_CNTL (0x0F400 * 4 = 0x3D000) & CP status
         const uint32_t secBefore = rd32(gpu, A510_RBBM_SECVID_TRUST_CNTL * 4U);

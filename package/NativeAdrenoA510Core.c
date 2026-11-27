@@ -92,6 +92,12 @@ A510CoreStatus a510_hw_init(const A510CoreOps *ops, A510Ring *ring, const A510Hw
         return A510_CORE_ERR_INVALID;
     }
 
+    /* 0. Clear RBBM_SECVID_TRUST_CNTL = 0 at start of a5xx_start() (verified from stock Kenzo
+     *    boot.img 0x409af0 & physical Kenzo Gate #3A G7 x0000) so CP PFP/ME boot in non-secure mode! */
+    if (cfg->clear_secvid_trust_cntl) {
+        gpu_w32(ops, A510_RBBM_SECVID_TRUST_CNTL, 0u);
+    }
+
     /* 1. VBIF & RBBM baseline (Linux a5xx_hw_init) */
     gpu_w32(ops, A510_VBIF_ROUND_ROBIN_QOS_ARB, 0x00000003u);
     gpu_w32(ops, A510_RBBM_PERFCTR_GPU_BUSY_MASKED, 0xffffffffu);
@@ -171,31 +177,26 @@ A510CoreStatus a510_hw_init(const A510CoreOps *ops, A510Ring *ring, const A510Hw
     gpu_w32(ops, A510_RBBM_INT_0_MASK, A510_RBBM_INT_0_MASK_DEFAULT);
     gpu_w32(ops, A510_CP_PFP_ME_CNTL, 0u);
 
-    /* 9. Emit CP_ME_INIT with Adreno 510 token/sync workaround (0x00000001) */
-    if (ring_free_dwords(ring) < 12u) {
+    /* 9. Emit CP_ME_INIT verified bit-for-bit from stock Kenzo boot.img (0x40843c) for a530_pm4.fw (0x5ff066):
+     *    count=7 (0x70c80007), arg0=0x0000000f, arg1=0x00000003 (multi-ctx), arg2=0x20000000 (err detect), arg3..6=0. */
+    if (ring_free_dwords(ring) < 8u) {
         return A510_CORE_ERR_RING_FULL;
     }
-    ring_push(ring, a510_pm4_type7_header(A510_CP_ME_INIT, 8u));
-    ring_push(ring, 0x0000002fu);
+    ring_push(ring, a510_pm4_type7_header(A510_CP_ME_INIT, 7u));
+    ring_push(ring, 0x0000000fu);
     ring_push(ring, 0x00000003u); /* multiple HW contexts */
     ring_push(ring, 0x20000000u); /* error detection */
     ring_push(ring, 0x00000000u);
     ring_push(ring, 0x00000000u);
-    ring_push(ring, 0x00000001u); /* A510 workaround (Linux a5xx_me_init) */
     ring_push(ring, 0x00000000u);
     ring_push(ring, 0x00000000u);
-    ring_flush(ops, ring, true);
+    ring_flush(ops, ring, false);
 
-    A510CoreStatus st = a510_wait_idle(ops, ring, 1000u);
+    A510CoreStatus st = a510_wait_idle(ops, ring, 5000u);
     if (st != A510_CORE_OK) {
         return st;
     }
     ring->rptr_cached = ring->wptr;
-
-    /* 10. Hardware Gate #2: drop secure mode on A510 (no ZAP shader) */
-    if (cfg->clear_secvid_trust_cntl) {
-        gpu_w32(ops, A510_RBBM_SECVID_TRUST_CNTL, 0u);
-    }
     return A510_CORE_OK;
 }
 
@@ -231,7 +232,7 @@ A510CoreStatus a510_ring_submit_smoke_write(const A510CoreOps *ops,
     ring_push(ring, (uint32_t)(ring->fence_iova >> 32));
     ring_push(ring, seqno);
 
-    ring_flush(ops, ring, true);
+    ring_flush(ops, ring, false);
     if (out_seqno) {
         *out_seqno = seqno;
     }
@@ -279,7 +280,7 @@ A510CoreStatus a510_ring_submit_ibs(const A510CoreOps *ops,
     ring_push(ring, (uint32_t)(ring->fence_iova >> 32));
     ring_push(ring, seqno);
 
-    ring_flush(ops, ring, true);
+    ring_flush(ops, ring, false);
     if (out_seqno) {
         *out_seqno = seqno;
     }

@@ -216,10 +216,9 @@ IOReturn KenzoBacklight::setProperties(OSObject *properties)
     } else if (OSNumber *brightness = OSDynamicCast(OSNumber, dict->getObject("brightness"))) {
         const int32_t requested = static_cast<int32_t>(brightness->unsigned32BitValue());
         if (requested <= 0) {
-            // Power-button sleep sends FadePeriod (or brightness=0); Control Center 0% sends no FadePeriod or min level.
-            goal = dict->getObject("FadePeriod") ? 0U : kMinVisible;
+            goal = 0U; // Allow Power-button sleep (brightness=0) to turn WLED4 fully OFF
         } else if (static_cast<uint32_t>(requested) < kMinVisible) {
-            goal = kMinVisible;
+            goal = kMinVisible; // Keep slider minimum dimly visible
         } else {
             goal = static_cast<uint32_t>(requested) > kMaxLevel ? kMaxLevel : static_cast<uint32_t>(requested);
         }
