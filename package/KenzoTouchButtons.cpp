@@ -546,11 +546,12 @@ void KenzoInputController::publishTouches()
         const uint32_t ry = slots[s].y > my ? my : slots[s].y;
         uint32_t sx = 0, sy = 0;
         if (touchRot == 90U) {
-            // Inverse of KenzoLegacyDisplay 90 deg CW landscape rotation (dx = physW-1-sy, dy = sx):
-            sx = (ry * kHidMaxX) / my;
+            // Inverse of KenzoLegacyDisplay 90 deg CW landscape rotation (dx = physW-1-sy, dy = sx),
+            // with Kenzo BOE NT35532 maXTouch native Y-axis inversion (ry=0 at USB/right, ry=my at earpiece/left):
+            sx = ((my - ry) * kHidMaxX) / my;
             sy = ((mx - rx) * kHidMaxY) / mx;
         } else if (touchRot == 270U) {
-            sx = ((my - ry) * kHidMaxX) / my;
+            sx = (ry * kHidMaxX) / my;
             sy = (rx * kHidMaxY) / mx;
         } else {
             sx = (rx * kHidMaxX) / mx;

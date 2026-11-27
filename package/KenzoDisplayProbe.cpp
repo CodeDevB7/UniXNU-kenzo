@@ -31,6 +31,7 @@ IOService *native_keyevents_allocate(void);
 void kenzo_cpufreq_run(void);
 void kenzo_backlight_start(void);
 void kenzo_input_start(void);
+void kenzo_gpu_probe_run(void);
 
 // Observable telemetry for Kenzo Stage 3 bring-up.
 // kenzo_display_stage milestones (single hex digit on top bar):
@@ -435,6 +436,7 @@ void native_legacy_display_late_probe(void)
     startLegacyDisplay();
     kenzo_backlight_start();
     kenzo_input_start();
+    kenzo_gpu_probe_run();
 }
 
 void native_legacy_display_probe(void)

@@ -291,17 +291,20 @@ public:
     backlight_src = ROOT / "kits/kenzo/KenzoBacklight.cpp"
     cpufreq_src = ROOT / "kits/kenzo/KenzoCpuFreq.cpp"
     input_src = ROOT / "kits/kenzo/KenzoTouchButtons.cpp"
+    gpu_probe_src = ROOT / "kits/kenzo/KenzoGpuProbe.cpp"
     hid_src = ROOT / "kits/kenzo/KenzoHidInput.cpp"
     hid_table_path = ROOT / "kits/kenzo/hid-input-bindings.json"
-    for req_p in (backlight_src, cpufreq_src, input_src, hid_src, hid_table_path):
+    for req_p in (backlight_src, cpufreq_src, input_src, gpu_probe_src, hid_src, hid_table_path):
         require(req_p.is_file(), f"Missing {req_p}")
 
     backlight_obj = OUT / "KenzoBacklight.o"
     cpufreq_obj = OUT / "KenzoCpuFreq.o"
     input_obj = OUT / "KenzoTouchButtons.o"
+    gpu_probe_obj = OUT / "KenzoGpuProbe.o"
     compile_iokit_cpp(backlight_src, backlight_obj)
     compile_iokit_cpp(cpufreq_src, cpufreq_obj)
     compile_iokit_cpp(input_src, input_obj)
+    compile_iokit_cpp(gpu_probe_src, gpu_probe_obj)
 
     # 4a. Build 207-slot NativeHidInput (late-staged against verified iPadOS 17.7.11 IOHIDDevice ABI)
     hid_table = json.loads(hid_table_path.read_text())
@@ -444,7 +447,7 @@ public:
     run([
         "xcrun", "ar", "rcs", archive,
         late, OUT / "original-bindings.o", probe_obj, policy_obj,
-        backlight_obj, cpufreq_obj, input_obj, hid_late, OUT / "hid-original-bindings.o",
+        backlight_obj, cpufreq_obj, input_obj, gpu_probe_obj, hid_late, OUT / "hid-original-bindings.o",
         keyevents_late, gop_late,
     ])
 
@@ -459,6 +462,7 @@ public:
         backlight_src,
         cpufreq_src,
         input_src,
+        gpu_probe_src,
         hid_src,
         table_path,
         hid_table_path,
