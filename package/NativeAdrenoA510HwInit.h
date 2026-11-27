@@ -92,7 +92,7 @@
 #define A510_TPL1_ADDR_MODE_CNTL 0x00f01u
 
 /* Exact 56-register A510 HWCG table verified bit-for-bit from stock Kenzo boot.img (0xd780b8) */
-static const uint32_t NativeAdrenoA510Hwcg[][2] = {
+static const uint32_t NativeAdrenoA510Hwcg[][2] __attribute__((unused)) = {
     { 0x00068u, 0x02222222u }, /* RBBM_CLOCK_CNTL_SP0 */
     { 0x00069u, 0x02222222u }, /* RBBM_CLOCK_CNTL_SP1 */
     { 0x0006cu, 0x02222220u }, /* RBBM_CLOCK_CNTL2_SP0 */
@@ -157,7 +157,7 @@ static const uint32_t NativeAdrenoA510Hwcg[][2] = {
  *   [28:24] = log2(len_dwords)
  *   [17:0]  = dword_offset << 2 (byte offset) */
 #define A510_PROTECT_RW(off, log2_len) (0x60000000u | (((uint32_t)(log2_len) & 0x1fu) << 24) | (((uint32_t)(off) << 2) & 0x3ffffu))
-static const uint32_t NativeAdrenoA510Protect[][2] = {
+static const uint32_t NativeAdrenoA510Protect[][2] __attribute__((unused)) = {
     {  0u, 0x62000010u }, /* RW off=0x00004 len=4   */
     {  1u, 0x63000020u }, /* RW off=0x00008 len=8   */
     {  2u, 0x64000040u }, /* RW off=0x00010 len=16  */

@@ -26,7 +26,13 @@ if ARCH != "arm64" or IOS_VERSION.split(".")[0] != "17":
 
 
 def run(cmd, **kw):
-    return subprocess.check_output([str(x) for x in cmd], timeout=120, **kw)
+    try:
+        return subprocess.check_output([str(x) for x in cmd], stderr=subprocess.STDOUT, timeout=120, **kw)
+    except subprocess.CalledProcessError as exc:
+        out = exc.output.decode("utf-8", errors="replace") if exc.output else ""
+        if out:
+            sys.stderr.write(out + ("\n" if not out.endswith("\n") else ""))
+        raise
 
 
 def require(cond, why):
@@ -337,6 +343,7 @@ static_assert(sizeof(IOService) == 136 && sizeof(IOAcceleratorES) == 136, "iPadO
         "__ZN15IOAcceleratorESC2EPK11OSMetaClass": 0xFFFFFFF004BD3B20,
         "__ZN15IOAcceleratorESD2Ev": 0xFFFFFFF004BD3B64,
         "__ZN15IOAcceleratorES10gMetaClassE": 0xFFFFFFF006AEB688,
+        "__ZTV15IOAcceleratorES": 0xFFFFFFF005D439A0 - 16,
     }
     aundef = {n for n, _, k in asyms if k == 1 and "15IOAcceleratorES" in n}
     amiss = aundef - set(accel_bindings)

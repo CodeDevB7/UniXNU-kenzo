@@ -26,6 +26,7 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/IOLocks.h>
 #include <IOKit/IOMemoryDescriptor.h>
+#include <IOKit/IOPlatformExpert.h>
 #include <IOKit/IOService.h>
 #include <IOKit/IOUserClient.h>
 #include <libkern/c++/OSBoolean.h>
@@ -184,6 +185,7 @@ class AGXDeviceUserClient : public IOUserClient {
     OSDeclareDefaultStructors(AGXDeviceUserClient)
 
 public:
+    using IOUserClient::initWithTask;
     bool initWithTask(task_t owningTask,
                       void *securityID,
                       UInt32 type,
@@ -483,8 +485,8 @@ IOReturn AGXDeviceUserClient::dispatchMethod(uint32_t method,
         }
         const uint64_t alignMask = ~((1ULL << req.align_log2) - 1ULL) & 0xFFFFFFFFULL;
         const IOOptionBits opts = static_cast<IOOptionBits>(kIODirectionInOut) |
-                                  static_cast<IOOptionBits>(kIOMemoryPhysicallyContiguous) |
-                                  static_cast<IOOptionBits>(kIOMemoryKernelUserShared);
+                                  static_cast<IOOptionBits>(kIOMemoryMapperNone) |
+                                  static_cast<IOOptionBits>(kIOMemoryPhysicallyContiguous);
         IOBufferMemoryDescriptor *desc = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
             kernel_task, opts, static_cast<mach_vm_size_t>(req.bytes), alignMask);
         if (!desc || desc->prepare() != kIOReturnSuccess) {
@@ -869,15 +871,15 @@ IOReturn AGXDeviceUserClient::dispatchMethod(uint32_t method,
         if (req.bytes > NativeAdrenoAbiMetadataBytes || req.reserved != 0U) {
             return kIOReturnBadArgument;
         }
+        if (req.bytes > 0U) {
+            char msg[NativeAdrenoAbiMetadataBytes + 1] = {};
+            memcpy(msg, req.text, req.bytes);
+            IOLog("KenzoGpuKmd: client report: %s\n", msg);
+        }
         IOLockLock(clientLock);
         if (req.handle == 0ULL) {
             metaLen = req.bytes;
             memcpy(clientMeta, req.text, req.bytes);
-            if (req.bytes > 0U) {
-                char msg[NativeAdrenoAbiMetadataBytes + 1] = {};
-                memcpy(msg, req.text, req.bytes);
-                IOLog("KenzoGpuKmd: client report: %s\n", msg);
-            }
         } else {
             KmdClientBo *bo = findBo(req.handle);
             if (!bo) {
@@ -1127,7 +1129,7 @@ extern "C" bool kenzo_gpu_kmd_publish(uintptr_t gpuBase,
         kenzo_gpu_accelerator_static_init();
         IOService *accel = kenzo_gpu_accelerator_allocate();
         IOService *platform = IOService::getPlatform();
-        if (accel && platform && accel->init(nullptr) && accel->attach(platform)) {
+        if (accel && platform && accel->init() && accel->attach(platform)) {
             accel->setName("AGXAccelerator");
             accel->setProperty("MetalPluginName", "NativeAdrenoMetal");
             accel->setProperty("MetalPluginClassName", "NativeAdrenoMetalDevice");
