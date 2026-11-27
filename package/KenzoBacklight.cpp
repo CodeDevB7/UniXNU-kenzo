@@ -25,6 +25,7 @@
 extern "C" {
 volatile int32_t kenzo_backlight_stats[8] = {};
 void kenzo_backlight_start(void);
+void kenzo_backlight_set_display_power(bool on);
 }
 
 namespace {
@@ -43,6 +44,9 @@ constexpr uint32_t kFadeStepMs   = 16U;
 
 const OSMetaClass *gAppleBacklightClass = nullptr;
 volatile uint32_t gImpersonating = 0;
+class KenzoBacklight;
+KenzoBacklight *gKenzoBacklight = nullptr;
+volatile uint32_t gDisplayPowerOn = 1U;
 
 } // namespace
 
@@ -54,6 +58,7 @@ public:
     void stop(IOService *provider) override;
     void free() override;
     IOReturn setProperties(OSObject *properties) override;
+    void setDisplayPower(bool on);
 
 private:
     kenzo_spmi::Channel ctrlCh;
@@ -61,6 +66,7 @@ private:
     IOWorkLoop *workLoop = nullptr;
     IOTimerEventSource *fadeTimer = nullptr;
     uint32_t currentLevel = 2048U;
+    uint32_t lastActiveLevel = 2048U;
     uint32_t startLevel = 2048U;
     uint32_t targetLevel = 2048U;
     uint32_t fadeStepsTotal = 0;
@@ -145,7 +151,7 @@ void KenzoBacklight::publishLevel(uint32_t level)
 {
     OSDictionary *params = OSDictionary::withCapacity(1);
     OSDictionary *brt = OSDictionary::withCapacity(3);
-    OSNumber *nMin = OSNumber::withNumber(kMinVisible, 32);
+    OSNumber *nMin = OSNumber::withNumber(0U, 32);
     OSNumber *nMax = OSNumber::withNumber(kMaxLevel, 32);
     OSNumber *nVal = OSNumber::withNumber(level, 32);
     if (params && brt && nMin && nMax && nVal) {
@@ -215,19 +221,25 @@ IOReturn KenzoBacklight::setProperties(OSObject *properties)
         }
     } else if (OSNumber *brightness = OSDynamicCast(OSNumber, dict->getObject("brightness"))) {
         const int32_t requested = static_cast<int32_t>(brightness->unsigned32BitValue());
-        if (requested <= 0) {
-            goal = 0U; // Allow Power-button sleep (brightness=0) to turn WLED4 fully OFF
-        } else if (static_cast<uint32_t>(requested) < kMinVisible) {
-            goal = kMinVisible; // Keep slider minimum dimly visible
-        } else {
-            goal = static_cast<uint32_t>(requested) > kMaxLevel ? kMaxLevel : static_cast<uint32_t>(requested);
-        }
         if (OSNumber *fade = OSDynamicCast(OSNumber, dict->getObject("FadePeriod"))) {
             uint64_t fms = (static_cast<uint64_t>(fade->unsigned32BitValue()) * 1000ULL) >> 16;
             if (fms > 5000ULL) {
                 fms = 5000ULL;
             }
             ms = static_cast<uint32_t>(fms);
+        }
+        const bool pwrOn = (__atomic_load_n(&gDisplayPowerOn, __ATOMIC_ACQUIRE) != 0U);
+        if (requested <= 0) {
+            // Allow Power-button sleep (display off or sleep fade >= 150 ms) to turn WLED4 fully OFF,
+            // while keeping Control Center 0% slider dimly visible when screen is awake.
+            goal = (!pwrOn || ms >= 150U) ? 0U : kMinVisible;
+        } else if (static_cast<uint32_t>(requested) < kMinVisible) {
+            goal = kMinVisible;
+        } else {
+            goal = static_cast<uint32_t>(requested) > kMaxLevel ? kMaxLevel : static_cast<uint32_t>(requested);
+        }
+        if (goal >= kMinVisible) {
+            lastActiveLevel = goal;
         }
     } else {
         return kIOReturnSuccess;
@@ -294,14 +306,28 @@ bool KenzoBacklight::startBacklight()
         kenzo_backlight_stats[0] = 3;
     }
 
+    gKenzoBacklight = this;
     registerService();
     IOLog("KenzoBacklight: WLED4 online arb=0x%x apids=%d/%d mod=0x%x level=%u/4095 st=%d\n",
           arbVer, ctrlCh.apid, sinkCh.apid, modVal, currentLevel, kenzo_backlight_stats[0]);
     return true;
 }
 
+void KenzoBacklight::setDisplayPower(bool on)
+{
+    __atomic_store_n(&gDisplayPowerOn, on ? 1U : 0U, __ATOMIC_RELEASE);
+    const uint32_t goal = on ? (lastActiveLevel >= kMinVisible ? lastActiveLevel : 2048U) : 0U;
+    __atomic_store_n(&pendingReq, (1ULL << 63) | (static_cast<uint64_t>(goal) << 16), __ATOMIC_RELEASE);
+    if (fadeTimer) {
+        fadeTimer->setTimeoutUS(1);
+    }
+}
+
 void KenzoBacklight::stop(IOService *provider)
 {
+    if (gKenzoBacklight == this) {
+        gKenzoBacklight = nullptr;
+    }
     if (fadeTimer) {
         fadeTimer->cancelTimeout();
         if (workLoop) {
@@ -344,4 +370,12 @@ extern "C" void kenzo_backlight_start(void)
         return;
     }
     bl->release();
+}
+
+extern "C" void kenzo_backlight_set_display_power(bool on)
+{
+    __atomic_store_n(&gDisplayPowerOn, on ? 1U : 0U, __ATOMIC_RELEASE);
+    if (gKenzoBacklight) {
+        gKenzoBacklight->setDisplayPower(on);
+    }
 }

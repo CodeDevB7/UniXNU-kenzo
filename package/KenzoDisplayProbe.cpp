@@ -30,6 +30,7 @@ IOService *native_legacy_display_allocate(void);
 IOService *native_keyevents_allocate(void);
 void kenzo_cpufreq_run(void);
 void kenzo_backlight_start(void);
+void kenzo_backlight_set_display_power(bool on);
 void kenzo_input_start(void);
 void kenzo_gpu_probe_run(void);
 extern volatile uint32_t kenzo_gpu_probe_state;
@@ -132,7 +133,12 @@ void native_legacy_client_observed(IOReturn result, IOUserClient *client)
     }
 }
 
-void native_legacy_pm_observed(unsigned, IOReturn, unsigned long) {}
+void native_legacy_pm_observed(unsigned stage, IOReturn status, unsigned long ordinal)
+{
+    if (stage == 3U && status == kIOReturnSuccess) {
+        kenzo_backlight_set_display_power(ordinal != 0UL);
+    }
+}
 
 void native_legacy_frame_observed(unsigned kind, uint64_t count,
                                   uint64_t minx, uint64_t miny, uint64_t maxx, uint64_t maxy)

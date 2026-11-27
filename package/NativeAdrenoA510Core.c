@@ -98,11 +98,15 @@ A510CoreStatus a510_hw_init(const A510CoreOps *ops, A510Ring *ring, const A510Hw
         gpu_w32(ops, A510_RBBM_SECVID_TRUST_CNTL, 0u);
     }
 
-    /* 1. VBIF & RBBM baseline (Linux a5xx_hw_init) */
+    /* 1. VBIF & RBBM baseline (verified against stock Kenzo boot.img 0x409af0..0x40a6ec) */
     gpu_w32(ops, A510_VBIF_ROUND_ROBIN_QOS_ARB, 0x00000003u);
     gpu_w32(ops, A510_RBBM_PERFCTR_GPU_BUSY_MASKED, 0xffffffffu);
     gpu_w32(ops, A510_RBBM_AHB_CNTL0, 0x00000001u);
-    gpu_w32(ops, A510_RBBM_INTERFACE_HANG_INT_CNTL, (1u << 30) | 0xffffu);
+    gpu_w32(ops, A510_RBBM_INTERFACE_HANG_MASK_CNTL0 + 0u, 0xf0000000u);
+    for (uint32_t m = 1u; m < 8u; ++m) {
+        gpu_w32(ops, A510_RBBM_INTERFACE_HANG_MASK_CNTL0 + m, 0xffffffffu);
+    }
+    gpu_w32(ops, A510_RBBM_INTERFACE_HANG_INT_CNTL, 0x4003ffffu);
     gpu_w32(ops, A510_RBBM_PERFCTR_CNTL, 0x01u);
     gpu_w32(ops, A510_CP_PERFCTR_CP_SEL_0, A510_PERF_CP_ALWAYS_COUNT);
     gpu_w32(ops, A510_RBBM_PERFCTR_RBBM_SEL_0, 6u);
@@ -121,16 +125,23 @@ A510CoreStatus a510_hw_init(const A510CoreOps *ops, A510Ring *ring, const A510Hw
     gpu_w32(ops, A510_CP_ROQ_THRESHOLDS_2, 0x40000030u);
     gpu_w32(ops, A510_CP_ROQ_THRESHOLDS_1, 0x20100d0au);
     gpu_w32(ops, A510_PC_DBG_ECO_CNTL, (0x200u << 11) | (0x200u << 22));
+    gpu_rmw(ops, A510_SP_DBG_ECO_CNTL, 0u, (1u << 25));
     gpu_w32(ops, A510_UCHE_MODE_CNTL, (1u << 29));
     gpu_w32(ops, A510_CP_CHICKEN_DBG, 0x02000000u);
     gpu_w32(ops, A510_RBBM_AHB_CNTL1, 0xa6ffffffu);
     gpu_rmw(ops, A510_RB_DBG_ECO_CNTL, (1u << 11), 0u);
 
-    /* 4. Hardware clock gating (186 registers from Linux a5xx_hwcg[]) */
-    for (uint32_t i = 0; i < NATIVE_ADRENO_A510_HWCG_COUNT; ++i) {
-        gpu_w32(ops, NativeAdrenoA510Hwcg[i][0], NativeAdrenoA510Hwcg[i][1]);
+    /* 4. Hardware clock gating (exact 56-register A510 table from stock Kenzo boot.img) */
+    if (!cfg->skip_hwcg) {
+        for (uint32_t i = 0; i < NATIVE_ADRENO_A510_HWCG_COUNT; ++i) {
+            gpu_w32(ops, NativeAdrenoA510Hwcg[i][0], NativeAdrenoA510Hwcg[i][1]);
+        }
+        gpu_w32(ops, A510_RBBM_CLOCK_CNTL, 0xaaa8aa00u);
+        gpu_w32(ops, A510_RBBM_ISDB_CNT, 0x00000182u);
+    } else {
+        gpu_w32(ops, A510_RBBM_CLOCK_CNTL, 0u);
+        gpu_w32(ops, A510_RBBM_ISDB_CNT, 0u);
     }
-    gpu_w32(ops, A510_RBBM_CLOCK_CNTL, 0xaaa8aa00u);
 
     gpu_w32(ops, A510_RBBM_AHB_CNTL2, 0x0000003fu);
     gpu_w32(ops, A510_TPL1_MODE_CNTL, (A510_HIGHEST_BANK_BIT - 13u) << 7);
@@ -200,15 +211,17 @@ A510CoreStatus a510_hw_init(const A510CoreOps *ops, A510Ring *ring, const A510Hw
     return A510_CORE_OK;
 }
 
-A510CoreStatus a510_ring_submit_smoke_write(const A510CoreOps *ops,
-                                            A510Ring *ring,
-                                            uint64_t target_iova,
-                                            uint32_t magic_word,
-                                            uint32_t *out_seqno) {
+A510CoreStatus a510_ring_submit_smoke_write_ex(const A510CoreOps *ops,
+                                               A510Ring *ring,
+                                               uint64_t target_iova,
+                                               uint32_t magic_word,
+                                               bool emit_event_write,
+                                               bool emit_event_irq,
+                                               uint32_t *out_seqno) {
     if (!ops || !ops->gpu_write32 || !ring || !ring->cpu_va || target_iova == 0u || ring->fence_iova == 0u) {
         return A510_CORE_ERR_INVALID;
     }
-    /* CP_MEM_WRITE (4) + CP_WAIT_FOR_IDLE (1) + CP_EVENT_WRITE (5) + CP_WHERE_AM_I (3) = 13 dwords */
+    /* CP_MEM_WRITE (4) + CP_WAIT_FOR_IDLE (1) + CP_EVENT_WRITE (5) = 10 dwords */
     if (ring_free_dwords(ring) < 13u) {
         ring->rptr_cached = gpu_r32(ops, A510_CP_RB_RPTR);
         if (ring_free_dwords(ring) < 13u) {
@@ -226,11 +239,14 @@ A510CoreStatus a510_ring_submit_smoke_write(const A510CoreOps *ops,
 
     ring_push(ring, a510_pm4_type7_header(A510_CP_WAIT_FOR_IDLE, 0u));
 
-    ring_push(ring, a510_pm4_type7_header(A510_CP_EVENT_WRITE, 4u));
-    ring_push(ring, (A510_EVENT_CACHE_FLUSH_TS & 0xffu) | A510_CP_EVENT_WRITE_0_IRQ);
-    ring_push(ring, (uint32_t)(ring->fence_iova & 0xffffffffu));
-    ring_push(ring, (uint32_t)(ring->fence_iova >> 32));
-    ring_push(ring, seqno);
+    if (emit_event_write) {
+        uint32_t ev = (A510_EVENT_CACHE_FLUSH_TS & 0xffu) | (emit_event_irq ? A510_CP_EVENT_WRITE_0_IRQ : 0u);
+        ring_push(ring, a510_pm4_type7_header(A510_CP_EVENT_WRITE, 4u));
+        ring_push(ring, ev);
+        ring_push(ring, (uint32_t)(ring->fence_iova & 0xffffffffu));
+        ring_push(ring, (uint32_t)(ring->fence_iova >> 32));
+        ring_push(ring, seqno);
+    }
 
     ring_flush(ops, ring, false);
     if (out_seqno) {
@@ -239,11 +255,20 @@ A510CoreStatus a510_ring_submit_smoke_write(const A510CoreOps *ops,
     return A510_CORE_OK;
 }
 
-A510CoreStatus a510_ring_submit_ibs(const A510CoreOps *ops,
-                                    A510Ring *ring,
-                                    const A510IbDesc *ibs,
-                                    size_t ib_count,
-                                    uint32_t *out_seqno) {
+A510CoreStatus a510_ring_submit_smoke_write(const A510CoreOps *ops,
+                                            A510Ring *ring,
+                                            uint64_t target_iova,
+                                            uint32_t magic_word,
+                                            uint32_t *out_seqno) {
+    return a510_ring_submit_smoke_write_ex(ops, ring, target_iova, magic_word, true, true, out_seqno);
+}
+
+A510CoreStatus a510_ring_submit_ibs_ex(const A510CoreOps *ops,
+                                       A510Ring *ring,
+                                       const A510IbDesc *ibs,
+                                       size_t ib_count,
+                                       bool emit_event_irq,
+                                       uint32_t *out_seqno) {
     if (!ops || !ops->gpu_write32 || !ring || !ring->cpu_va || !ibs || ib_count == 0u || ib_count > 128u ||
         ring->fence_iova == 0u) {
         return A510_CORE_ERR_INVALID;
@@ -274,15 +299,26 @@ A510CoreStatus a510_ring_submit_ibs(const A510CoreOps *ops,
 
     ring_push(ring, a510_pm4_type7_header(A510_CP_WAIT_FOR_IDLE, 0u));
 
-    ring_push(ring, a510_pm4_type7_header(A510_CP_EVENT_WRITE, 4u));
-    ring_push(ring, (A510_EVENT_CACHE_FLUSH_TS & 0xffu) | A510_CP_EVENT_WRITE_0_IRQ);
-    ring_push(ring, (uint32_t)(ring->fence_iova & 0xffffffffu));
-    ring_push(ring, (uint32_t)(ring->fence_iova >> 32));
-    ring_push(ring, seqno);
+    {
+        uint32_t ev = (A510_EVENT_CACHE_FLUSH_TS & 0xffu) | (emit_event_irq ? A510_CP_EVENT_WRITE_0_IRQ : 0u);
+        ring_push(ring, a510_pm4_type7_header(A510_CP_EVENT_WRITE, 4u));
+        ring_push(ring, ev);
+        ring_push(ring, (uint32_t)(ring->fence_iova & 0xffffffffu));
+        ring_push(ring, (uint32_t)(ring->fence_iova >> 32));
+        ring_push(ring, seqno);
+    }
 
     ring_flush(ops, ring, false);
     if (out_seqno) {
         *out_seqno = seqno;
     }
     return A510_CORE_OK;
+}
+
+A510CoreStatus a510_ring_submit_ibs(const A510CoreOps *ops,
+                                    A510Ring *ring,
+                                    const A510IbDesc *ibs,
+                                    size_t ib_count,
+                                    uint32_t *out_seqno) {
+    return a510_ring_submit_ibs_ex(ops, ring, ibs, ib_count, true, out_seqno);
 }

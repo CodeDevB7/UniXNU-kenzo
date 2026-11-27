@@ -61,6 +61,7 @@ typedef struct {
     /* Hardware Gate #2: Linux a5xx_hw_init() writes RBBM_SECVID_TRUST_CNTL = 0 on A510
      * (no ZAP shader). Kept opt-in so physical bring-up can test EL1 access safely. */
     bool clear_secvid_trust_cntl;
+    bool skip_hwcg;
 } A510HwInitConfig;
 
 typedef struct {
@@ -80,14 +81,29 @@ A510CoreStatus a510_ring_init(A510Ring *ring,
 A510CoreStatus a510_hw_init(const A510CoreOps *ops, A510Ring *ring, const A510HwInitConfig *cfg);
 
 /* Emit a self-contained hardware smoke test: CP_MEM_WRITE(target_iova, magic_word) +
- * CP_EVENT_WRITE(CACHE_FLUSH_TS | IRQ, fence_iova, seqno) + CP_WHERE_AM_I. */
+ * optional CP_EVENT_WRITE(CACHE_FLUSH_TS [| IRQ], fence_iova, seqno). */
+A510CoreStatus a510_ring_submit_smoke_write_ex(const A510CoreOps *ops,
+                                               A510Ring *ring,
+                                               uint64_t target_iova,
+                                               uint32_t magic_word,
+                                               bool emit_event_write,
+                                               bool emit_event_irq,
+                                               uint32_t *out_seqno);
+
 A510CoreStatus a510_ring_submit_smoke_write(const A510CoreOps *ops,
                                             A510Ring *ring,
                                             uint64_t target_iova,
                                             uint32_t magic_word,
                                             uint32_t *out_seqno);
 
-/* Emit a client IB batch (1..128 IBs) followed by CACHE_FLUSH_TS fence & WHERE_AM_I. */
+/* Emit a client IB batch (1..128 IBs) followed by CACHE_FLUSH_TS fence. */
+A510CoreStatus a510_ring_submit_ibs_ex(const A510CoreOps *ops,
+                                       A510Ring *ring,
+                                       const A510IbDesc *ibs,
+                                       size_t ib_count,
+                                       bool emit_event_irq,
+                                       uint32_t *out_seqno);
+
 A510CoreStatus a510_ring_submit_ibs(const A510CoreOps *ops,
                                     A510Ring *ring,
                                     const A510IbDesc *ibs,
