@@ -315,15 +315,30 @@ static bool runGate3BSmoke(uintptr_t gpu, unsigned mode)
         smokeSt = a510_ring_submit_smoke_write_ex(&ops, &ring, dmaPa + kScratchOff, 0xA510CAFEU,
                                                   (noEv == 0U), (noIrq == 0U), &seqno);
         if (smokeSt == A510_CORE_OK) {
+            if (noEv == 0U) {
+                for (uint32_t f = 0; f < 2000U; ++f) {
+                    flush_dcache64(reinterpret_cast<addr64_t>(dmaVa + kFenceOff), 0x1000U, FALSE);
+                    if (*fenceVa >= seqno) {
+                        break;
+                    }
+                    IODelay(10);
+                }
+            }
             if (clrInt != 0U) {
-                IODelay(2000);
                 wr32(gpu, A510_RBBM_INT_CLEAR_CMD * 4U, rd32(gpu, A510_RBBM_INT_0_STATUS * 4U));
             }
             idleSt = a510_wait_idle(&ops, &ring, 2000U);
-            if (mode >= 6U && idleSt == A510_CORE_OK) {
+            if (mode >= 6U && (idleSt == A510_CORE_OK || *fenceVa >= seqno)) {
                 const A510IbDesc ib = { dmaPa + kIbOff, 5U };
                 ibSt = a510_ring_submit_ibs_ex(&ops, &ring, &ib, 1U, (noIrq == 0U), &seqno2);
                 if (ibSt == A510_CORE_OK) {
+                    for (uint32_t f = 0; f < 2000U; ++f) {
+                        flush_dcache64(reinterpret_cast<addr64_t>(dmaVa + kFenceOff), 0x1000U, FALSE);
+                        if (*fenceVa >= seqno2) {
+                            break;
+                        }
+                        IODelay(10);
+                    }
                     idle2St = a510_wait_idle(&ops, &ring, 2000U);
                 }
             }
@@ -334,8 +349,9 @@ static bool runGate3BSmoke(uintptr_t gpu, unsigned mode)
     const uint32_t gotScratch = *scratchVa;
     const uint32_t gotScratch2 = *scratch2Va;
     const uint32_t gotFence = *fenceVa;
-    const uint32_t rptr = rd32(gpu, A510_CP_RB_RPTR * 4U);
+    IODelay(20);
     const uint32_t rbbmPost = rd32(gpu, kRbbmStatus);
+    const uint32_t rptr = rd32(gpu, A510_CP_RB_RPTR * 4U);
     const uint32_t intSt = rd32(gpu, A510_RBBM_INT_0_STATUS * 4U);
     const uint32_t hwFault = rd32(gpu, A510_CP_HW_FAULT * 4U);
     if (intSt != 0U) {
@@ -365,13 +381,14 @@ static bool runGate3BSmoke(uintptr_t gpu, unsigned mode)
           gotScratch, gotScratch2, gotFence, rptr, ring.wptr, rbbmPost, intSt, hwFault);
 
     // Keep dmaDesc alive if GPU successfully ran (ring remains referenced by CP_RB_BASE).
-    if (mode >= 6U && initSt == A510_CORE_OK && idleSt == A510_CORE_OK && idle2St == A510_CORE_OK &&
+    if (mode >= 6U && initSt == A510_CORE_OK &&
+        (idle2St == A510_CORE_OK || gotFence >= 2U) &&
         gotScratch == 0xA510CAFEU && gotScratch2 == 0xA5101B01U) {
         kenzo_gpu_probe_state = 9U; // G9 = PHYSICAL ADRENO 510 INDIRECT BUFFER 0xA5101B01 + FENCE VERIFIED!
         return true;
     }
-    if (initSt == A510_CORE_OK && idleSt == A510_CORE_OK && gotScratch == 0xA510CAFEU) {
-        kenzo_gpu_probe_state = 8U; // G8 = PHYSICAL ADRENO 510 PM4 SMOKE WRITE 0xA510CAFE + CLEAN IDLE VERIFIED!
+    if (initSt == A510_CORE_OK && (idleSt == A510_CORE_OK || gotFence >= 1U) && gotScratch == 0xA510CAFEU) {
+        kenzo_gpu_probe_state = 8U; // G8 = PHYSICAL ADRENO 510 PM4 SMOKE WRITE 0xA510CAFE + FENCE VERIFIED!
         return true;
     }
     return false;

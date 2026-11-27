@@ -72,13 +72,18 @@ A510CoreStatus a510_wait_idle(const A510CoreOps *ops, const A510Ring *ring, uint
         return A510_CORE_ERR_INVALID;
     }
     for (uint32_t i = 0; i < max_iters; ++i) {
-        uint32_t rptr = gpu_r32(ops, A510_CP_RB_RPTR);
-        uint32_t status = gpu_r32(ops, A510_RBBM_STATUS);
-        if (rptr == ring->wptr && (status & A510_RBBM_STATUS_BUSY_BIT) == 0u) {
-            return A510_CORE_OK;
-        }
+        /* Delay first and read RBBM_STATUS BEFORE CP_RB_RPTR: on Adreno 510,
+         * an AHB read of CP_RB_RPTR briefly wakes CP_BUSY/PFP_BUSY/ME_BUSY (0x800001C1)
+         * on the immediately following RBBM_STATUS read! */
         if (ops->udelay) {
-            ops->udelay(ops->ctx, 10u);
+            ops->udelay(ops->ctx, 20u);
+        }
+        uint32_t status = gpu_r32(ops, A510_RBBM_STATUS);
+        if ((status & A510_RBBM_STATUS_BUSY_BIT) == 0u) {
+            uint32_t rptr = gpu_r32(ops, A510_CP_RB_RPTR);
+            if (rptr == ring->wptr) {
+                return A510_CORE_OK;
+            }
         }
     }
     return A510_CORE_ERR_IDLE_TIMEOUT;
