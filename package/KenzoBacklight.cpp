@@ -153,7 +153,7 @@ void KenzoBacklight::publishLevel(uint32_t level)
 {
     OSDictionary *params = OSDictionary::withCapacity(1);
     OSDictionary *brt = OSDictionary::withCapacity(3);
-    OSNumber *nMin = OSNumber::withNumber(0U, 32);
+    OSNumber *nMin = OSNumber::withNumber(static_cast<uint64_t>(0), 32);
     OSNumber *nMax = OSNumber::withNumber(kMaxLevel, 32);
     OSNumber *nVal = OSNumber::withNumber(level, 32);
     if (params && brt && nMin && nMax && nVal) {
