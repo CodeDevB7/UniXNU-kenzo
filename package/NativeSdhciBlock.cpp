@@ -24,6 +24,7 @@
 #include <libkern/c++/OSString.h>
 #include <libkern/crypto/sha2.h>
 #include <libkern/libkern.h>
+#include <pexpert/pexpert.h>
 #include <sys/param.h>
 #include <sys/types.h>
 
@@ -58,14 +59,14 @@ int native_verified_block_root_authorized(dev_t device);
 int native_verified_block_manifest_sha384(dev_t device, const char *uuid, uint8_t digest[48]);
 int native_verified_block_volume_device(const char *uuid, dev_t *device, char *path, size_t size);
 
-// Weak-import persistence & loader-release stubs for NativeRamBlock (run Data volume purely in RAM).
-unsigned native_ufs_store_mode(void) { return 0; }
-int native_ufs_store_open(uint64_t, uint64_t *, const char **) { return -1; }
-int native_ufs_store_read(uint64_t, uint32_t, void *) { return -1; }
-int native_ufs_store_write(uint64_t, uint32_t, const void *) { return -1; }
-int native_ufs_store_write_cached(uint64_t, uint32_t, const void *) { return -1; }
-int native_ufs_store_sync(void) { return 0; }
-unsigned native_ufs_store_gpt_check(void) { return 0; }
+// Persistent Data backing store exports for NativeRamBlock (SDCC2 microSD ONLY, gated by data-persist=1|2).
+unsigned native_ufs_store_mode(void);
+int native_ufs_store_open(uint64_t required4k, uint64_t *firstLbaOut, const char **reasonOut);
+int native_ufs_store_read(uint64_t rel4k, uint32_t count4k, void *dst);
+int native_ufs_store_write(uint64_t rel4k, uint32_t count4k, const void *src);
+int native_ufs_store_write_cached(uint64_t rel4k, uint32_t count4k, const void *src);
+int native_ufs_store_sync(void);
+unsigned native_ufs_store_gpt_check(void);
 bool ml_static_mfree_prepare(vm_offset_t, vm_size_t) { return false; }
 }
 
@@ -111,6 +112,7 @@ constexpr uint32_t kPresentDatInhibit   = 1U << 1;
 constexpr uint32_t kPresentDat0Level    = 1U << 20;
 constexpr uint16_t kIntCommandComplete  = 1U << 0;
 constexpr uint16_t kIntTransferComplete = 1U << 1;
+constexpr uint16_t kIntBufferWriteReady = 1U << 4;
 constexpr uint16_t kIntBufferReadReady  = 1U << 5;
 constexpr uint16_t kIntError            = 1U << 15;
 
@@ -121,6 +123,9 @@ constexpr uint16_t kTrnsReadSinglePio   = 0x0010U; // Read, Single, PIO
 constexpr uint16_t kTrnsReadMultiPio    = 0x0036U; // Multi | Read | AutoCMD12 | BlkCntEn, PIO
 constexpr uint16_t kTrnsReadSingleDma   = 0x0011U; // Read, Single, DMA
 constexpr uint16_t kTrnsReadMultiDma    = 0x0037U; // Multi | Read | AutoCMD12 | BlkCntEn, DMA
+constexpr uint16_t kTrnsWriteSinglePio  = 0x0000U; // Write, Single, PIO
+constexpr uint16_t kTrnsWriteSingleDma  = 0x0001U; // Write, Single, DMA
+constexpr uint16_t kTrnsWriteMultiDma   = 0x0027U; // Multi | Write | AutoCMD12 | BlkCntEn, DMA
 constexpr uint32_t kAdmaMaxBytes        = kBlockBytes * kMaxMultiSectors; // 64 KiB
 struct __attribute__((packed)) Adma2Desc32 {
     uint16_t attr;
@@ -133,6 +138,7 @@ constexpr uint16_t kCmdRespR3           = 0x0002U;
 constexpr uint16_t kCmdRespR1           = 0x001AU;
 constexpr uint16_t kCmdRespR1b          = 0x001BU;
 constexpr uint16_t kCmdDataReadFlags    = 0x003AU;
+constexpr uint16_t kCmdDataWriteFlags   = 0x003AU;
 
 struct ShngWindowSpec {
     char name[33];
@@ -241,6 +247,12 @@ public:
     void configureWindowChild(NativeSdhciBlock *parent, const ShngWindowSpec &spec);
     bool authenticatesVolume(const char *uuid, uint8_t *manifestDigest) const;
     bool readBlocksToDescriptor(IOMemoryDescriptor *buffer, uint64_t lba, uint64_t count, uint64_t *actualOut);
+    bool storeRead4k(uint64_t baseLba, uint64_t rel4k, uint32_t count4k, void *dst);
+    bool storeWrite4k(uint64_t baseLba, uint64_t rel4k, uint32_t count4k, const void *src);
+    bool storeSync();
+    bool storeCheckLba(uint64_t lba);
+    uint64_t getShngImageEndLba() const { return shngImageEndLba; }
+    bool isMicroSd() const { return isSdCardDevice && online && ownsDevice; }
 
 private:
     IOMemoryMap *mapping = nullptr;
@@ -253,13 +265,16 @@ private:
     uint64_t partitionFirstLba = 0;
     uint64_t userdataFirstLba = 0;
     uint64_t userdataBlocks = 0;
+    uint64_t shngImageEndLba = 0;
     uint32_t intClearDelayUs = 2; // 100us during 400kHz init, 2us at 9.6MHz+ data clock
     bool isWindowChild = false;
+    bool isSdCardDevice = false;
     bool windowPublished = false;
     bool online = false;
     bool ownsDevice = false;
     bool useMultiBlock = true;
     bool useAdma2 = false;
+    bool useAdma2Write = true;
     IOBufferMemoryDescriptor *admaBufDesc = nullptr;
     IOBufferMemoryDescriptor *admaTableDesc = nullptr;
     uint8_t *admaBufVirt = nullptr;
@@ -316,10 +331,13 @@ private:
     void setClockDivider(uint16_t divider);
     void resetCmdDat();
     bool waitCommandIdle(uint32_t milliseconds);
+    bool waitCardReadyLocked(uint32_t milliseconds);
     bool sendCommand(uint32_t commandIndex, uint32_t argument, uint16_t flags, uint32_t *respOut);
     bool reinitCardFallback(bool isSdCard);
     void initAdma2Locked();
     bool readAdma2Locked(uint64_t lba, uint32_t count);
+    bool writeAdma2Locked(uint64_t lba, uint32_t count);
+    bool writeSingleSectorLocked(uint64_t lba, const uint8_t *src512);
     bool readSingleSectorLocked(uint64_t lba, uint8_t *dst512);
     bool readMultiSectorsToDescLocked(IOMemoryDescriptor *buffer, uint64_t byteOffset,
                                       uint64_t lba, uint32_t count);
@@ -1210,6 +1228,9 @@ bool NativeSdhciBlock::readRootLayoutAt(uint64_t baseLba, uint64_t maxBlocks,
     if ((version != 1 && version != 2) || count == 0 || count > kMaxEntries) {
         return false;
     }
+    if (imageBytes > 0) {
+        shngImageEndLba = baseLba + ((imageBytes + kBlockBytes - 1ULL) / kBlockBytes);
+    }
 
     bool foundOs = false;
     for (uint32_t index = 0; index < count; ++index) {
@@ -1290,6 +1311,7 @@ bool NativeSdhciBlock::start(IOService *provider)
     const uint64_t phys = mapping->getPhysicalAddress();
     native_sdhci_mmio_physical = phys;
     const bool isSdCard = (phys == 0x07864900ULL);
+    isSdCardDevice = isSdCard;
 
     gate = IOLockAlloc();
     if (!gate) {
@@ -1339,6 +1361,10 @@ bool NativeSdhciBlock::start(IOService *provider)
     native_sdhci_ready = 1;
     native_sdhci_sectors = capacity;
     __atomic_fetch_add(&native_sdhci_windows_published, 1U, __ATOMIC_RELAXED);
+    if (isSdCard && foundShng) {
+        extern NativeSdhciBlock *gKenzoSdStoreCtrl;
+        gKenzoSdStoreCtrl = this;
+    }
     IOLog("NativeSdhciBlock: online %llu MiB (%s, read-only, extra_windows=%u)\n",
           (capacity * kBlockBytes) >> 20, windowPublished ? windowName : "raw userdata", extraCount);
     registerService();
@@ -1430,3 +1456,352 @@ void NativeSdhciBlock::free()
     parentController = nullptr;
     IOBlockStorageDevice::free();
 }
+
+// --- Persistent microSD (SDCC2 ONLY) backing store for NativeRamBlock ---
+NativeSdhciBlock *gKenzoSdStoreCtrl = nullptr;
+static uint64_t gKenzoStoreBaseLba = 0;
+static uint64_t gKenzoStoreWindow4k = 0;
+
+bool NativeSdhciBlock::waitCardReadyLocked(uint32_t milliseconds)
+{
+    for (uint32_t i = 0; i < milliseconds * 100U; ++i) {
+        const uint32_t ps = read32(kPresentState);
+        if ((ps & (kPresentCmdInhibit | kPresentDatInhibit)) == 0U &&
+            (ps & kPresentDat0Level) != 0U) {
+            return true;
+        }
+        IODelay(10);
+    }
+    return false;
+}
+
+bool NativeSdhciBlock::writeAdma2Locked(uint64_t lba, uint32_t count)
+{
+    if (!ownsDevice || !registers || !admaBufVirt || !admaTableVirt ||
+        count == 0 || count > kMaxMultiSectors || lba > 0xFFFFFFFFULL) {
+        return false;
+    }
+    const uint32_t bytes = count * kBlockBytes;
+    const uint32_t first = bytes > 32768U ? 32768U : bytes;
+    const uint32_t rem = bytes - first;
+    admaTableVirt[0].attr = rem ? 0x0021U : 0x0023U;
+    admaTableVirt[0].length = static_cast<uint16_t>(first);
+    admaTableVirt[0].address = static_cast<uint32_t>(admaBufPhys);
+    if (rem) {
+        admaTableVirt[1].attr = 0x0023U;
+        admaTableVirt[1].length = static_cast<uint16_t>(rem);
+        admaTableVirt[1].address = static_cast<uint32_t>(admaBufPhys + first);
+    }
+    flush_dcache64(reinterpret_cast<addr64_t>(admaTableVirt), 64U, FALSE);
+    flush_dcache64(reinterpret_cast<addr64_t>(admaBufVirt), bytes, FALSE);
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    write32(kNormalIntSignal, 0U);
+    write32(kNormalIntEnable, 0xFFFFFFFFU);
+    write32(kNormalIntStatus, 0xFFFFFFFFU);
+    (void)read32(kNormalIntStatus);
+    write8(kTimeoutControl, 0x0EU);
+
+    if (!waitCardReadyLocked(1000)) {
+        resetCmdDat();
+        if (!waitCardReadyLocked(500)) {
+            return false;
+        }
+    }
+
+    const uint8_t hc1 = read8(kHostControl1);
+    write8(kHostControl1, static_cast<uint8_t>((hc1 & ~0x18U) | 0x10U)); // 32-bit ADMA2
+    write32(kAdmaSysAddr, static_cast<uint32_t>(admaTablePhys));
+    write16(kBlockSize, static_cast<uint16_t>(0x7000U | kBlockBytes));
+    write16(kBlockCount, static_cast<uint16_t>(count));
+    write32(kArgument, static_cast<uint32_t>(lba));
+    const uint32_t cmd = (count > 1U) ? 25U : 24U;
+    const uint16_t trns = (count > 1U) ? kTrnsWriteMultiDma : kTrnsWriteSingleDma;
+    write32(kTransferCmd, static_cast<uint32_t>(trns) |
+                          (static_cast<uint32_t>((cmd << 8) | kCmdDataWriteFlags) << 16));
+
+    bool xferDone = false;
+    uint16_t errStatus = 0;
+    uint16_t normStatus = 0;
+    for (uint32_t spin = 0; spin < 2000000U; ++spin) {
+        normStatus = read16(kNormalIntStatus);
+        if ((normStatus & kIntError) != 0) {
+            errStatus = read16(kErrorIntStatus);
+            break;
+        }
+        if ((normStatus & kIntTransferComplete) != 0) {
+            write16(kNormalIntStatus, kIntTransferComplete);
+            xferDone = true;
+            break;
+        }
+        if (spin >= 256U && (spin & 0xFFU) == 0U) {
+            IODelay(1);
+        } else {
+            __asm__ volatile("yield");
+        }
+    }
+
+    const uint8_t admaErr = read8(kAdmaErrStatus);
+    write32(kNormalIntStatus, 0xFFFFFFFFU);
+    (void)read32(kNormalIntStatus);
+
+    if (errStatus != 0 || !xferDone) {
+        IOLog("NativeSdhciBlock: ADMA2 write err=0x%x norm=0x%x adma=0x%x lba=0x%llx cnt=%u\n",
+              errStatus, normStatus, admaErr, lba, count);
+        write8(kHostControl1, static_cast<uint8_t>(hc1 & ~0x18U));
+        resetCmdDat();
+        if (count > 1U) {
+            uint32_t stopResp = 0;
+            (void)sendCommand(12U, 0U, kCmdRespR1b, &stopResp);
+        }
+        return false;
+    }
+
+    return waitCardReadyLocked(1500);
+}
+
+bool NativeSdhciBlock::writeSingleSectorLocked(uint64_t lba, const uint8_t *src512)
+{
+    if (!ownsDevice || !registers || !src512 || lba > 0xFFFFFFFFULL) {
+        return false;
+    }
+    write32(kNormalIntSignal, 0U);
+    write32(kNormalIntEnable, 0xFFFFFFFFU);
+    write32(kNormalIntStatus, 0xFFFFFFFFU);
+    (void)read32(kNormalIntStatus);
+    write8(kTimeoutControl, 0x0EU);
+
+    if (!waitCardReadyLocked(1000)) {
+        resetCmdDat();
+        if (!waitCardReadyLocked(500)) {
+            return false;
+        }
+    }
+
+    const uint8_t hc1 = read8(kHostControl1);
+    write8(kHostControl1, static_cast<uint8_t>(hc1 & ~0x18U)); // PIO
+    write16(kBlockSize, static_cast<uint16_t>(0x7000U | kBlockBytes));
+    write16(kBlockCount, 1U);
+    write32(kArgument, static_cast<uint32_t>(lba));
+    write32(kTransferCmd, static_cast<uint32_t>(kTrnsWriteSinglePio) |
+                          (static_cast<uint32_t>((24U << 8) | kCmdDataWriteFlags) << 16));
+
+    bool wrReady = false;
+    uint16_t errStatus = 0;
+    for (uint32_t spin = 0; spin < 500000U; ++spin) {
+        const uint16_t norm = read16(kNormalIntStatus);
+        if (norm & kIntError) {
+            errStatus = read16(kErrorIntStatus);
+            break;
+        }
+        if (norm & kIntBufferWriteReady) {
+            write16(kNormalIntStatus, kIntBufferWriteReady);
+            wrReady = true;
+            break;
+        }
+        IODelay(1);
+    }
+    if (!wrReady || errStatus != 0) {
+        write32(kNormalIntStatus, 0xFFFFFFFFU);
+        resetCmdDat();
+        return false;
+    }
+    for (uint32_t w = 0; w < kBlockBytes / 4U; ++w) {
+        uint32_t word = 0;
+        memcpy(&word, src512 + w * 4U, 4U);
+        write32(kBufferPort, word);
+    }
+    bool xferDone = false;
+    for (uint32_t spin = 0; spin < 1000000U; ++spin) {
+        const uint16_t norm = read16(kNormalIntStatus);
+        if (norm & kIntError) {
+            errStatus = read16(kErrorIntStatus);
+            break;
+        }
+        if (norm & kIntTransferComplete) {
+            write16(kNormalIntStatus, kIntTransferComplete);
+            xferDone = true;
+            break;
+        }
+        IODelay(1);
+    }
+    write32(kNormalIntStatus, 0xFFFFFFFFU);
+    if (!xferDone || errStatus != 0) {
+        resetCmdDat();
+        return false;
+    }
+    return waitCardReadyLocked(1500);
+}
+
+bool NativeSdhciBlock::storeCheckLba(uint64_t lba)
+{
+    if (!gate || !online || !isSdCardDevice) {
+        return false;
+    }
+    IOLockLock(gate);
+    const bool ok = readSingleSectorLocked(lba, sectorBuf);
+    IOLockUnlock(gate);
+    return ok;
+}
+
+bool NativeSdhciBlock::storeRead4k(uint64_t baseLba, uint64_t rel4k, uint32_t count4k, void *dst)
+{
+    if (!gate || !online || !isSdCardDevice || !dst || count4k == 0) {
+        return false;
+    }
+    uint8_t *out = static_cast<uint8_t *>(dst);
+    uint64_t lba = baseLba + rel4k * 8ULL;
+    uint32_t remSectors = count4k * 8U;
+    IOLockLock(gate);
+    bool ok = true;
+    while (remSectors > 0) {
+        const uint32_t chunk = remSectors > kMaxMultiSectors ? kMaxMultiSectors : remSectors;
+        if (useAdma2 && readAdma2Locked(lba, chunk)) {
+            memcpy(out, admaBufVirt, static_cast<size_t>(chunk) * kBlockBytes);
+            out += static_cast<size_t>(chunk) * kBlockBytes;
+            lba += chunk;
+            remSectors -= chunk;
+            continue;
+        }
+        for (uint32_t s = 0; s < chunk; ++s) {
+            if (!readSingleSectorLocked(lba + s, out + static_cast<size_t>(s) * kBlockBytes)) {
+                ok = false;
+                break;
+            }
+        }
+        if (!ok) {
+            break;
+        }
+        out += static_cast<size_t>(chunk) * kBlockBytes;
+        lba += chunk;
+        remSectors -= chunk;
+    }
+    IOLockUnlock(gate);
+    return ok;
+}
+
+bool NativeSdhciBlock::storeWrite4k(uint64_t baseLba, uint64_t rel4k, uint32_t count4k, const void *src)
+{
+    if (!gate || !online || !isSdCardDevice || !src || count4k == 0) {
+        return false;
+    }
+    const uint8_t *in = static_cast<const uint8_t *>(src);
+    uint64_t lba = baseLba + rel4k * 8ULL;
+    uint32_t remSectors = count4k * 8U;
+    IOLockLock(gate);
+    bool ok = true;
+    while (remSectors > 0) {
+        const uint32_t chunk = remSectors > kMaxMultiSectors ? kMaxMultiSectors : remSectors;
+        if (useAdma2 && useAdma2Write && admaBufVirt) {
+            memcpy(admaBufVirt, in, static_cast<size_t>(chunk) * kBlockBytes);
+            if (writeAdma2Locked(lba, chunk)) {
+                in += static_cast<size_t>(chunk) * kBlockBytes;
+                lba += chunk;
+                remSectors -= chunk;
+                continue;
+            }
+            useAdma2Write = false;
+        }
+        for (uint32_t s = 0; s < chunk; ++s) {
+            if (!writeSingleSectorLocked(lba + s, in + static_cast<size_t>(s) * kBlockBytes)) {
+                ok = false;
+                break;
+            }
+        }
+        if (!ok) {
+            break;
+        }
+        in += static_cast<size_t>(chunk) * kBlockBytes;
+        lba += chunk;
+        remSectors -= chunk;
+    }
+    IOLockUnlock(gate);
+    return ok;
+}
+
+bool NativeSdhciBlock::storeSync()
+{
+    if (!gate || !online || !isSdCardDevice) {
+        return false;
+    }
+    IOLockLock(gate);
+    const bool ok = waitCardReadyLocked(1500);
+    IOLockUnlock(gate);
+    return ok;
+}
+
+extern "C" {
+
+unsigned native_ufs_store_mode(void)
+{
+    unsigned mode = 0;
+    PE_parse_boot_argn("data-persist", &mode, sizeof(mode));
+    return (mode == 1U || mode == 2U) ? mode : 0U;
+}
+
+int native_ufs_store_open(uint64_t required4k, uint64_t *firstLbaOut, const char **reasonOut)
+{
+    NativeSdhciBlock *ctrl = gKenzoSdStoreCtrl;
+    if (!ctrl || !ctrl->isMicroSd()) {
+        if (reasonOut) { *reasonOut = "sdcc2-microsd-not-ready"; }
+        return 0;
+    }
+    if (required4k == 0 || required4k > 0x200000ULL) { // max 8 GiB sanity cap
+        if (reasonOut) { *reasonOut = "invalid-window-size"; }
+        return 0;
+    }
+    // Strictly past SHNGROOT image end (8.74 GiB = 0x0117A200); anchor at >= 10 GiB (0x01400000)
+    uint64_t baseLba = 0x01400000ULL;
+    const uint64_t shngEnd = ctrl->getShngImageEndLba();
+    if (shngEnd > baseLba) {
+        baseLba = (shngEnd + 0x7FFFULL) & ~0x7FFFULL;
+    }
+    const uint64_t windowSectors = required4k * 8ULL;
+    const uint64_t lastLba = baseLba + windowSectors - 1ULL;
+    if (lastLba > 0xFFFFFFFFULL || !ctrl->storeCheckLba(lastLba)) {
+        if (reasonOut) { *reasonOut = "microsd-too-small-for-data-window"; }
+        return 0;
+    }
+    gKenzoStoreBaseLba = baseLba;
+    gKenzoStoreWindow4k = required4k;
+    if (firstLbaOut) { *firstLbaOut = baseLba; }
+    IOLog("NativeSdhciBlock: persistent Data store OPEN on SDCC2 microSD lba=0x%llx..0x%llx (%llu MiB)\n",
+          baseLba, lastLba, (required4k * 4096ULL) >> 20);
+    return 1;
+}
+
+int native_ufs_store_read(uint64_t rel4k, uint32_t count4k, void *dst)
+{
+    NativeSdhciBlock *ctrl = gKenzoSdStoreCtrl;
+    if (!ctrl || !gKenzoStoreWindow4k || rel4k >= gKenzoStoreWindow4k || count4k > gKenzoStoreWindow4k - rel4k) {
+        return 0;
+    }
+    return ctrl->storeRead4k(gKenzoStoreBaseLba, rel4k, count4k, dst) ? 1 : 0;
+}
+
+int native_ufs_store_write(uint64_t rel4k, uint32_t count4k, const void *src)
+{
+    NativeSdhciBlock *ctrl = gKenzoSdStoreCtrl;
+    if (!ctrl || !gKenzoStoreWindow4k || rel4k >= gKenzoStoreWindow4k || count4k > gKenzoStoreWindow4k - rel4k) {
+        return 0;
+    }
+    return ctrl->storeWrite4k(gKenzoStoreBaseLba, rel4k, count4k, src) ? 1 : 0;
+}
+
+int native_ufs_store_write_cached(uint64_t rel4k, uint32_t count4k, const void *src)
+{
+    return native_ufs_store_write(rel4k, count4k, src);
+}
+
+int native_ufs_store_sync(void)
+{
+    NativeSdhciBlock *ctrl = gKenzoSdStoreCtrl;
+    return (ctrl && ctrl->storeSync()) ? 1 : 0;
+}
+
+unsigned native_ufs_store_gpt_check(void)
+{
+    return (gKenzoSdStoreCtrl && gKenzoSdStoreCtrl->isMicroSd() && gKenzoStoreWindow4k > 0) ? 1U : 0U;
+}
+
+} // extern "C"

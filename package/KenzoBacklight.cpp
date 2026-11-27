@@ -113,19 +113,23 @@ bool KenzoBacklight::applyHardwareLevel(uint32_t level)
     const uint8_t syncSet = 0x03U;
     const uint8_t syncClr = 0x00U;
 
-    bool ok = kenzo_spmi::writeBytes(sinkCh, kRegBright0Lsb, brt, 2) &&
-              kenzo_spmi::writeBytes(sinkCh, kRegBright1Lsb, brt, 2) &&
-              kenzo_spmi::writeBytes(sinkCh, kRegSync, &syncSet, 1);
-    if (ok) {
-        IODelay(1000);
-        ok = kenzo_spmi::writeBytes(sinkCh, kRegSync, &syncClr, 1);
-    }
-    if (ok && !modEnabled) {
+    bool ok = true;
+    if (!modEnabled) {
         const uint8_t on = 0x80U;
         ok = kenzo_spmi::writeBytes(ctrlCh, kRegModEn, &on, 1);
         if (ok) {
             modEnabled = true;
+            IODelay(1000);
         }
+    }
+    if (ok) {
+        ok = kenzo_spmi::writeBytes(sinkCh, kRegBright0Lsb, brt, 2) &&
+             kenzo_spmi::writeBytes(sinkCh, kRegBright1Lsb, brt, 2) &&
+             kenzo_spmi::writeBytes(sinkCh, kRegSync, &syncSet, 1);
+    }
+    if (ok) {
+        IODelay(1000);
+        ok = kenzo_spmi::writeBytes(sinkCh, kRegSync, &syncClr, 1);
     }
     if (!ok) {
         __atomic_fetch_add(&kenzo_backlight_stats[4], 1, __ATOMIC_RELAXED);

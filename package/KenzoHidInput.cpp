@@ -444,8 +444,11 @@ public:
         // Request the normal generic HID event personality for this owned
         // keyboard. This is a matching property, not a client entitlement.
         if(!setProperty("HIDDefaultBehavior",true))return false;
-        unsigned touch=0;
-        touchEnabled=PE_parse_boot_argn("touch-hid",&touch,sizeof(touch)) && touch==1;
+        unsigned touch=0,kTouch=0,sTouch=0;
+        PE_parse_boot_argn("touch-hid",&touch,sizeof(touch));
+        PE_parse_boot_argn("kenzo-touch",&kTouch,sizeof(kTouch));
+        PE_parse_boot_argn("sheng-touch-hid",&sTouch,sizeof(sTouch));
+        touchEnabled=(touch==1 || kTouch==1 || sTouch==1);
         // DigitizerCollectionDispatch: IOHIDEventDriver (setDigitizerProperties) reads it up the service plane and then sends each
         // report's fingers as one digitizer collection with a child per finger. Without it a touch screen gets one event per finger,
         // and backboardd takes each as the whole touch set, so no two fingers are ever down together for UIKit (no pinch, no

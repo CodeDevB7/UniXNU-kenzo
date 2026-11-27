@@ -46,6 +46,7 @@ volatile int native_touch_ys[12] = {};
 volatile int native_touch_ids[12] = {};
 
 volatile uint32_t kenzo_touch_events = 0;
+volatile uint32_t kenzo_touch_status = 0; // 0=off, 1=probing, 2=online, 0xE1..=fail
 volatile uint32_t kenzo_button_mask = 0;
 
 static void (*gTouchSink)(void *) = nullptr;
@@ -110,7 +111,7 @@ constexpr uint32_t kGpioTsLdo   = 134U;
 constexpr uint16_t kPpidPm8950Pon = 0x008U;
 constexpr uint8_t  kPonRtStsReg   = 0x10U; // bit 0 = Power, bit 1 = VolDown
 
-// Qualcomm QUP v2 I2C registers
+// Qualcomm QUP v2 I2C registers (verified against MSM8956 i2c-msm-v2.c & mainline i2c-qup.c)
 constexpr uint32_t kQupConfig          = 0x000U;
 constexpr uint32_t kQupState           = 0x004U;
 constexpr uint32_t kQupIoModes         = 0x008U;
@@ -118,18 +119,26 @@ constexpr uint32_t kQupSwReset         = 0x00CU;
 constexpr uint32_t kQupOperational     = 0x018U;
 constexpr uint32_t kQupErrorFlags      = 0x01CU;
 constexpr uint32_t kQupErrorFlagsEn    = 0x020U;
+constexpr uint32_t kQupOperationalMask = 0x028U;
+constexpr uint32_t kQupMxOutputCnt     = 0x100U;
 constexpr uint32_t kQupOutFifoBase     = 0x110U;
 constexpr uint32_t kQupMxWriteCnt      = 0x150U;
+constexpr uint32_t kQupMxInputCnt      = 0x200U;
 constexpr uint32_t kQupMxReadCnt       = 0x208U;
 constexpr uint32_t kQupInFifoBase      = 0x218U;
 constexpr uint32_t kQupI2cClkCtl       = 0x400U;
 constexpr uint32_t kQupI2cMasterStatus = 0x404U;
 constexpr uint32_t kQupI2cMasterCfg    = 0x408U;
 
-// QUP v2 I2C tags
+constexpr uint32_t kQupIoModesFifo     = (1U << 14) | (1U << 15); // UNPACK_EN | PACK_EN, FIFO in/out
+constexpr uint32_t kI2cStatusErrMask   = 0x038000FCU; // BUS_ERR|NACK|ARB|FAILED|INV_TAG|INV_RD_ADDR|INV_RD_SEQ
+constexpr uint32_t kQupClk400k         = 0x000E031CU; // 19.2 MHz XO -> 400 kHz (HT=14, HS=3, FS=28)
+constexpr uint32_t kQupClk100k         = 0x003E007CU; // 19.2 MHz XO -> 100 kHz (HT=62, FS=124)
+
+// QUP v2 I2C tags (verified from i2c-msm-v2.h & i2c-qup.c)
 constexpr uint8_t kTagStart        = 0x81U;
 constexpr uint8_t kTagDataWrite    = 0x82U;
-constexpr uint8_t kTagDataReadStop = 0x8DU;
+constexpr uint8_t kTagDataReadStop = 0x87U;
 
 // Atmel maXTouch 7-bit I2C address & coordinate range expected by NativeHidInput.cpp
 constexpr uint8_t  kMxtI2cAddr   = 0x4AU;
@@ -183,7 +192,8 @@ static bool qupSetState(uintptr_t qup, uint32_t state)
 }
 
 static bool qupI2cReadReg16(uintptr_t qup, uint32_t clkCtl, uint8_t slaveAddr,
-                            uint16_t regAddr, uint8_t *out, uint8_t len)
+                            uint16_t regAddr, uint8_t *out, uint8_t len,
+                            uint32_t *diagMst = nullptr, uint32_t *diagOp = nullptr, uint32_t *diagErr = nullptr)
 {
     if (!qup || !out || len == 0 || len > 32) {
         return false;
@@ -196,13 +206,15 @@ static bool qupI2cReadReg16(uintptr_t qup, uint32_t clkCtl, uint8_t slaveAddr,
     }
 
     w32(qup, kQupConfig, (2U << 8) | 0x07U); // MINI_CORE=I2C, N=8-bit
-    w32(qup, kQupIoModes, 1U << 16);         // OUTPUT_BIT_SHIFT_EN, FIFO mode
     w32(qup, kQupI2cMasterCfg, 1U);          // QUP_I2C_EN_VERSION_TWO_TAG
-    w32(qup, kQupErrorFlags, 0x7CU);
-    w32(qup, kQupErrorFlagsEn, 0x7CU);
-    w32(qup, kQupOperational, 0x300U);       // clear SVC flags
+    for (uint32_t i = 0; i < 1000U && !(r32(qup, kQupState) & (1U << 4)); ++i) {
+        IODelay(1); // wait QUP_I2C_MAST_GEN
+    }
+    w32(qup, kQupIoModes, kQupIoModesFifo);  // UNPACK_EN | PACK_EN, FIFO in/out
+    w32(qup, kQupMxOutputCnt, 0U);
+    w32(qup, kQupMxInputCnt, 0U);
 
-    // TX sequence (10 bytes): START, addrW, DATA_WR, 2, regLo, regHi, START, addrR, DATA_RD_STOP, len
+    // TX sequence (10 bytes): START, addrW, DATA_WR, 2, regLo, regHi, START, addrR, DATA_RD_STOP (0x87), len
     const uint8_t tx[12] = {
         kTagStart, static_cast<uint8_t>(slaveAddr << 1),
         kTagDataWrite, 2U,
@@ -216,13 +228,23 @@ static bool qupI2cReadReg16(uintptr_t qup, uint32_t clkCtl, uint8_t slaveAddr,
 
     w32(qup, kQupMxWriteCnt, 10U);
     w32(qup, kQupMxReadCnt, rxTotal);
+    w32(qup, kQupErrorFlags, 0x3CU);
+    w32(qup, kQupErrorFlagsEn, 0x3CU);
+    w32(qup, kQupOperationalMask, 0U);
+    w32(qup, kQupOperational, 0x300U);       // clear OUT/IN SVC flags
+    w32(qup, kQupI2cMasterStatus, kI2cStatusErrMask);
 
-    if (!qupSetState(qup, 1U)) { // RUN
+    if (!qupSetState(qup, 1U)) { // RESET -> RUN
         return false;
     }
-    w32(qup, kQupI2cClkCtl, clkCtl);
+    w32(qup, kQupI2cClkCtl, clkCtl); // must be written in RUN state
 
-    // Push 3 packed 32-bit words (10 bytes) into OUT FIFO
+    if (!qupSetState(qup, 3U)) { // RUN -> PAUSE before loading OUT FIFO
+        (void)qupSetState(qup, 0U);
+        return false;
+    }
+
+    // Push 3 packed 32-bit words (10 bytes) into OUT FIFO while PAUSED
     for (uint32_t w = 0; w < 3U; ++w) {
         const uint32_t word = static_cast<uint32_t>(tx[w * 4U + 0U]) |
                               (static_cast<uint32_t>(tx[w * 4U + 1U]) << 8) |
@@ -231,27 +253,44 @@ static bool qupI2cReadReg16(uintptr_t qup, uint32_t clkCtl, uint8_t slaveAddr,
         w32(qup, kQupOutFifoBase, word);
     }
 
+    if (!qupSetState(qup, 1U)) { // PAUSE -> RUN to start transfer
+        (void)qupSetState(qup, 0U);
+        return false;
+    }
+
     uint8_t rxBuf[40] = {};
     uint32_t rxGot = 0;
+    uint32_t lastMst = 0, lastOp = 0, lastErr = 0;
     bool failed = false;
     for (uint32_t spin = 0; spin < 10000U; ++spin) {
-        const uint32_t mst = r32(qup, kQupI2cMasterStatus);
-        if (mst & 0x38U) { // PACKET_NACKED | ARB_LOST | QUP_I2C_INVALID_*
+        lastMst = r32(qup, kQupI2cMasterStatus);
+        lastErr = r32(qup, kQupErrorFlags);
+        lastOp = r32(qup, kQupOperational);
+        if ((lastMst & kI2cStatusErrMask) != 0U || (lastErr & 0x3CU) != 0U) {
             failed = true;
             break;
         }
-        const uint32_t op = r32(qup, kQupOperational);
         while ((r32(qup, kQupOperational) & (1U << 5)) && rxGot < sizeof(rxBuf)) {
             const uint32_t word = r32(qup, kQupInFifoBase);
             for (uint32_t b = 0; b < 4U && rxGot < sizeof(rxBuf); ++b) {
                 rxBuf[rxGot++] = static_cast<uint8_t>((word >> (b * 8U)) & 0xFFU);
             }
         }
-        if (rxGot >= rxTotal && (op & (1U << 11))) { // MAX_INPUT_DONE_FLAG
+        lastOp = r32(qup, kQupOperational);
+        if (rxGot >= rxTotal && (lastOp & (1U << 11))) { // MAX_INPUT_DONE_FLAG
             break;
         }
         IODelay(2);
     }
+
+    if (!failed) {
+        for (uint32_t i = 0; i < 2000U && (r32(qup, kQupI2cMasterStatus) & (1U << 8)); ++i) {
+            IODelay(1); // wait BUS_ACTIVE == 0
+        }
+    }
+    if (diagMst) { *diagMst = lastMst; }
+    if (diagOp)  { *diagOp = lastOp; }
+    if (diagErr) { *diagErr = lastErr; }
 
     (void)qupSetState(qup, 0U);
     if (failed || rxGot < rxTotal) {
@@ -292,7 +331,8 @@ private:
     uint32_t lastBtnMask = 0;
     uint32_t btnPollDiv = 0;
 
-    uint32_t qupClkCtl = 0x035DU; // 100 kHz default (0x0315 = 400 kHz)
+    uint32_t qupClkCtl = kQupClk100k;
+    uint32_t touchRot = 0U; // 0 = portrait, 90 = landscape CW (matches KenzoLegacyDisplay)
     uint16_t t5Addr = 0;
     uint8_t  t5Size = 0;
     uint16_t t44Addr = 0;
@@ -343,29 +383,35 @@ bool KenzoInputController::initTouchHardware()
     tlmmCfg(tlmm, kGpioSda, 3U << 2);
     tlmmCfg(tlmm, kGpioScl, 3U << 2);
 
-    // 3. Power up Atmel maXTouch VDD LDO (GPIO 134 HIGH), pulse Reset (GPIO 64 LOW->HIGH), set IRQ input
-    tlmmCfg(tlmm, kGpioTsLdo, (1U << 9) | (7U << 6)); // OE, 16mA
-    tlmmOut(tlmm, kGpioTsLdo, true);
-    tlmmCfg(tlmm, kGpioTsIrq, (3U << 6) | 3U);        // input, pull-up
-    tlmmCfg(tlmm, kGpioTsReset, (1U << 9) | (3U << 6) | 3U); // OE, 8mA, pull-up
+    // 3. Power up Atmel maXTouch in verified stock order: Reset LOW -> VDD LDO HIGH -> 150 ms -> Reset HIGH -> 160 ms
+    kenzo_touch_status = 1U;
+    tlmmCfg(tlmm, kGpioTsIrq, (3U << 6) | 3U);                // input, 8mA, pull-up
+    tlmmCfg(tlmm, kGpioTsReset, (1U << 9) | (3U << 6) | 3U);  // OE, 8mA, pull-up
+    tlmmCfg(tlmm, kGpioTsLdo, (1U << 9) | (7U << 6) | 3U);    // OE, 16mA, pull-up
     tlmmOut(tlmm, kGpioTsReset, false);
-    IOSleep(25);
+    tlmmOut(tlmm, kGpioTsLdo, false);
+    IOSleep(20);
+    tlmmOut(tlmm, kGpioTsLdo, true);
+    IOSleep(150);
     tlmmOut(tlmm, kGpioTsReset, true);
-    IOSleep(110);
+    IOSleep(160);
 
     // 4. Probe Atmel maXTouch Info Block @ 0x0000 (try 400 kHz first, fall back to 100 kHz)
     uint8_t info[7] = {};
-    qupClkCtl = 0x0315U; // 400 kHz
-    if (!qupI2cReadReg16(qup, qupClkCtl, kMxtI2cAddr, 0x0000U, info, 7)) {
-        qupClkCtl = 0x035DU; // 100 kHz fallback
-        if (!qupI2cReadReg16(qup, qupClkCtl, kMxtI2cAddr, 0x0000U, info, 7)) {
-            IOLog("KenzoTouch: maXTouch @ 0x4A probe failed (mst=0x%x)\n", r32(qup, kQupI2cMasterStatus));
+    uint32_t dMst = 0, dOp = 0, dErr = 0;
+    qupClkCtl = kQupClk400k;
+    if (!qupI2cReadReg16(qup, qupClkCtl, kMxtI2cAddr, 0x0000U, info, 7, &dMst, &dOp, &dErr)) {
+        qupClkCtl = kQupClk100k;
+        if (!qupI2cReadReg16(qup, qupClkCtl, kMxtI2cAddr, 0x0000U, info, 7, &dMst, &dOp, &dErr)) {
+            kenzo_touch_status = 0xE1U;
+            IOLog("KenzoTouch: maXTouch @ 0x4A probe failed (mst=0x%x op=0x%x err=0x%x)\n", dMst, dOp, dErr);
             return false;
         }
     }
 
     const uint8_t numObjs = info[6];
     if (numObjs == 0 || numObjs > 64) {
+        kenzo_touch_status = 0xE2U;
         IOLog("KenzoTouch: invalid object count %u (fam=0x%02x)\n", numObjs, info[0]);
         return false;
     }
@@ -402,19 +448,33 @@ bool KenzoInputController::initTouchHardware()
     }
 
     if (t100Addr) {
+        uint8_t cfg1 = 0;
         uint8_t xbuf[2] = {}, ybuf[2] = {};
+        (void)qupI2cReadReg16(qup, qupClkCtl, kMxtI2cAddr, static_cast<uint16_t>(t100Addr + 1U), &cfg1, 1);
         if (qupI2cReadReg16(qup, qupClkCtl, kMxtI2cAddr, static_cast<uint16_t>(t100Addr + 13U), xbuf, 2) &&
             qupI2cReadReg16(qup, qupClkCtl, kMxtI2cAddr, static_cast<uint16_t>(t100Addr + 24U), ybuf, 2)) {
-            const uint16_t xr = static_cast<uint16_t>(xbuf[0]) | (static_cast<uint16_t>(xbuf[1]) << 8);
-            const uint16_t yr = static_cast<uint16_t>(ybuf[0]) | (static_cast<uint16_t>(ybuf[1]) << 8);
+            uint16_t xr = static_cast<uint16_t>(xbuf[0]) | (static_cast<uint16_t>(xbuf[1]) << 8);
+            uint16_t yr = static_cast<uint16_t>(ybuf[0]) | (static_cast<uint16_t>(ybuf[1]) << 8);
+            if (cfg1 & 0x20U) { // MXT_T100_CFG_SWITCHXY
+                const uint16_t tmp = xr;
+                xr = yr;
+                yr = tmp;
+            }
             if (xr >= 200U && xr <= 8192U) { maxX = xr; }
             if (yr >= 200U && yr <= 8192U) { maxY = yr; }
         }
     }
 
-    IOLog("KenzoTouch: maXTouch fam=0x%02x var=0x%02x ver=0x%02x objs=%u T5=0x%x(%u) T44=0x%x T100=%u..%u range=%ux%u clk=0x%x\n",
-          info[0], info[1], info[2], numObjs, t5Addr, t5Size, t44Addr, t100MinId, t100MaxId, maxX + 1U, maxY + 1U, qupClkCtl);
-    return t5Addr != 0 && t5Size >= 6 && (t100MinId != 0 || t9MinId != 0);
+    unsigned landscapeArg = 0;
+    PE_parse_boot_argn("kenzo-landscape", &landscapeArg, sizeof(landscapeArg));
+    touchRot = (landscapeArg == 1U) ? 90U : 0U;
+    PE_parse_boot_argn("kenzo-touch-rot", &touchRot, sizeof(touchRot));
+
+    const bool ok = (t5Addr != 0 && t5Size >= 6 && (t100MinId != 0 || t9MinId != 0));
+    kenzo_touch_status = ok ? 2U : 0xE3U;
+    IOLog("KenzoTouch: maXTouch fam=0x%02x var=0x%02x ver=0x%02x objs=%u T5=0x%x(%u) T44=0x%x T100=%u..%u range=%ux%u rot=%u clk=0x%x\n",
+          info[0], info[1], info[2], numObjs, t5Addr, t5Size, t44Addr, t100MinId, t100MaxId, maxX + 1U, maxY + 1U, touchRot, qupClkCtl);
+    return ok;
 }
 
 void KenzoInputController::publishTouches()
@@ -423,13 +483,27 @@ void KenzoInputController::publishTouches()
     __atomic_store_n(&native_touch_seq, seq + 1U, __ATOMIC_RELAXED);
     __asm__ volatile("dmb ishst" ::: "memory");
 
+    const uint32_t mx = maxX ? maxX : 1079U;
+    const uint32_t my = maxY ? maxY : 1919U;
     uint32_t count = 0;
     for (unsigned s = 0; s < kMaxSlots; ++s) {
         if (!slots[s].active) {
             continue;
         }
-        const uint32_t sx = (static_cast<uint32_t>(slots[s].x) * kHidMaxX) / (maxX ? maxX : 1079U);
-        const uint32_t sy = (static_cast<uint32_t>(slots[s].y) * kHidMaxY) / (maxY ? maxY : 1919U);
+        const uint32_t rx = slots[s].x > mx ? mx : slots[s].x;
+        const uint32_t ry = slots[s].y > my ? my : slots[s].y;
+        uint32_t sx = 0, sy = 0;
+        if (touchRot == 90U) {
+            // Inverse of KenzoLegacyDisplay 90 deg CW landscape rotation (dx = physW-1-sy, dy = sx):
+            sx = (ry * kHidMaxX) / my;
+            sy = ((mx - rx) * kHidMaxY) / mx;
+        } else if (touchRot == 270U) {
+            sx = ((my - ry) * kHidMaxX) / my;
+            sy = (rx * kHidMaxY) / mx;
+        } else {
+            sx = (rx * kHidMaxX) / mx;
+            sy = (ry * kHidMaxY) / my;
+        }
         native_touch_xs[count] = static_cast<int>(sx > kHidMaxX ? kHidMaxX : sx);
         native_touch_ys[count] = static_cast<int>(sy > kHidMaxY ? kHidMaxY : sy);
         native_touch_ids[count] = static_cast<int>(s + 1U);

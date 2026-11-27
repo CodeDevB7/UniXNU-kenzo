@@ -417,8 +417,12 @@ public:
         uint32_t width=0,height=0;getDisplayDimensions(&width,&height);
         uint64_t length=(uint64_t)width*height*4;
         if(PE_current_console(&video) || video.v_baseAddr!=bootMapping->getPhysicalAddress() ||
-           video.v_width!=width || video.v_height!=height || video.v_depth!=32 || video.v_rotate ||
-           !native_legacy_surface_bounds(width,height,video.v_rowBytes,bootMapping->getLength(),bootMapping->getLength())) {
+           video.v_depth!=32 || video.v_rotate ||
+           !native_legacy_surface_bounds((uint32_t)video.v_width,(uint32_t)video.v_height,video.v_rowBytes,bootMapping->getLength(),bootMapping->getLength())) {
+            transferred=true;native_legacy_transfer_observed(kIOReturnNotReady,request,0);finishTransfer(request);return;
+        }
+        const bool isRotLandscape=(video.v_width==height && video.v_height==width && video.v_width<video.v_height);
+        if(!isRotLandscape && (video.v_width!=width || video.v_height!=height)) {
             transferred=true;native_legacy_transfer_observed(kIOReturnNotReady,request,0);finishTransfer(request);return;
         }
         static int sourceCached=-1;
@@ -456,7 +460,64 @@ public:
                 else if((dr[2]>>16) && (dr[3]>>16) && (dr[0]>>16)<width && (dr[1]>>16)<height && (dr[2]>>16)<=width && (dr[3]>>16)<=height){
                     dstX=dr[0]>>16;dstY=dr[1]>>16;
                 }
-                if(layersCopied==0 && dstX==0 && dstY==0 && (lw!=width || lh!=height) && width<=2048 && lw!=height) {
+                if(isRotLandscape) {
+                    if(sourceCached)flush_dcache64((addr64_t)lMap->getVirtualAddress(),(unsigned)(lh*lStride),FALSE);
+                    uint64_t t0,t1;__asm__ volatile("isb\n\tmrs %0, cntpct_el0":"=r"(t0));
+                    uintptr_t dstBase=(uintptr_t)bootMapping->getVirtualAddress();
+                    uintptr_t srcBase=(uintptr_t)lMap->getVirtualAddress();
+                    const uint32_t physW=(uint32_t)video.v_width, physH=(uint32_t)video.v_height;
+                    if(layersCopied==0 && dstX==0 && dstY==0 && lw==width && lh==height) {
+                        // Fast 32x32 cache-tiled 90 deg CW transpose: sequential src reads + sequential 64-bit WC stores.
+                        uint32_t tile[32][32];
+                        for(uint32_t by=0;by<physH;by+=32) {
+                            const uint32_t th=(physH-by)<32?(physH-by):32;
+                            for(uint32_t bx=0;bx<physW;bx+=32) {
+                                const uint32_t tw=(physW-bx)<32?(physW-bx):32;
+                                for(uint32_t tx=0;tx<tw;++tx) {
+                                    const uint32_t sy=physW-1-(bx+tx);
+                                    const uint32_t *in=reinterpret_cast<const uint32_t *>(srcBase+(uint64_t)sy*lStride)+by;
+                                    for(uint32_t ty=0;ty<th;++ty)tile[ty][tx]=in[ty];
+                                }
+                                for(uint32_t ty=0;ty<th;++ty) {
+                                    volatile uint32_t *out32=reinterpret_cast<volatile uint32_t *>(dstBase+(uint64_t)(by+ty)*video.v_rowBytes)+bx;
+                                    uint32_t tx=0;
+                                    if(((uintptr_t)out32 & 7U)==0U) {
+                                        volatile uint64_t *out64=reinterpret_cast<volatile uint64_t *>(out32);
+                                        const uint64_t *src64=reinterpret_cast<const uint64_t *>(tile[ty]);
+                                        for(;tx+2<=tw;tx+=2)out64[tx/2]=src64[tx/2];
+                                    }
+                                    for(;tx<tw;++tx)out32[tx]=tile[ty][tx];
+                                }
+                            }
+                        }
+                    } else if(layersCopied==0 && dstX==0 && dstY==0) {
+                        // Scaled full-frame landscape -> 90 deg CW portrait GOP.
+                        for(uint32_t dy=0;dy<physH;++dy) {
+                            uint32_t sx=(uint32_t)(((uint64_t)dy*lw)/width);
+                            if(sx>=lw)sx=(uint32_t)lw-1;
+                            volatile uint32_t *out32=reinterpret_cast<volatile uint32_t *>(dstBase+(uint64_t)dy*video.v_rowBytes);
+                            for(uint32_t dx=0;dx<physW;++dx) {
+                                uint32_t sy=(uint32_t)(((uint64_t)(physW-1-dx)*lh)/height);
+                                if(sy>=lh)sy=(uint32_t)lh-1;
+                                const uint32_t *in=reinterpret_cast<const uint32_t *>(srcBase+(uint64_t)sy*lStride);
+                                out32[dx]=in[sx];
+                            }
+                        }
+                    } else if(dstX<width && dstY<height) {
+                        uint32_t maxW=(uint32_t)lw<width-dstX?(uint32_t)lw:width-dstX;
+                        uint32_t maxH=(uint32_t)lh<height-dstY?(uint32_t)lh:height-dstY;
+                        for(uint32_t r=0;r<maxH;++r) {
+                            const uint32_t *in=reinterpret_cast<const uint32_t *>(srcBase+(uint64_t)r*lStride);
+                            const uint32_t dx=physW-1-(dstY+r);
+                            for(uint32_t c=0;c<maxW;++c) {
+                                volatile uint32_t *out=reinterpret_cast<volatile uint32_t *>(dstBase+(uint64_t)(dstX+c)*video.v_rowBytes)+dx;
+                                *out=in[c];
+                            }
+                        }
+                    }
+                    __asm__ volatile("dsb sy\n\tisb\n\tmrs %0, cntpct_el0":"=r"(t1));
+                    copyTicks+=t1-t0;
+                } else if(layersCopied==0 && dstX==0 && dstY==0 && (lw!=width || lh!=height) && width<=2048 && lw!=height) {
                     // Full-frame scaled surface (e.g. iPad7,1 1536x2048 canvas -> 1080x2240 physical GOP scanout).
                     // Flush the entire source surface once outside the row loop so dsb sy does not stall write-combining on every row.
                     if(cachedColMapW!=width || cachedColMapLw!=(uint32_t)lw) {
@@ -506,7 +567,7 @@ public:
                     if(layersCopied==0 && lw==height && lh==width) {
                         uintptr_t dstBase=(uintptr_t)bootMapping->getVirtualAddress();
                         uintptr_t srcBase=(uintptr_t)lMap->getVirtualAddress();
-                        uint32_t rotH=width<copyHeight?width:copyHeight;
+                        uint32_t rotH=(uint32_t)lw<copyHeight?(uint32_t)lw:copyHeight;
                         for(uint32_t sy=0;sy<lh && sy<width;++sy) {
                             const uint32_t *in=reinterpret_cast<const uint32_t *>(srcBase+(uint64_t)sy*lStride);
                             uint32_t dx=width-1-(uint32_t)sy;
@@ -591,9 +652,12 @@ public:
         // Before the content scan and the copy read it: drop any line of this mapping older than the finished frame.
         if(sourceCached)flush_dcache64((addr64_t)source->getVirtualAddress(),(unsigned)source->getLength(),FALSE);
         if(uint64_t physical=source->getPhysicalAddress())sirius_fb_source_wimg=pmap_cache_attributes((unsigned int)(physical>>12));
-        if(!native_legacy_copy_layout(reinterpret_cast<volatile void *>(bootMapping->getVirtualAddress()),
+        if(!isRotLandscape && !native_legacy_copy_layout(reinterpret_cast<volatile void *>(bootMapping->getVirtualAddress()),
             bootMapping->getLength(),video.v_rowBytes,reinterpret_cast<const void *>(source->getVirtualAddress()),
             source->getLength(),sourceStride,width,height)) {
+            OSSafeReleaseNULL(source);native_legacy_transfer_observed(kIOReturnBadArgument,request,0);return;
+        }
+        if(isRotLandscape && (sourceStride<(uint64_t)width*4 || source->getLength()<sourceStride*height)) {
             OSSafeReleaseNULL(source);native_legacy_transfer_observed(kIOReturnBadArgument,request,0);return;
         }
         // The two content scans read every pixel again; they only describe the first frames (the probe keeps 32).
@@ -615,7 +679,36 @@ public:
         }
         uint64_t copyStart;__asm__ volatile("isb\n\tmrs %0, cntpct_el0":"=r"(copyStart));
         uint64_t stored=UINT64_MAX;
-        {
+        if(isRotLandscape) {
+            // Fast 32x32 cache-tiled 90 deg CW rotate blitter (1920x1080 landscape -> 1080x1920 physical GOP).
+            shadowValid=false;
+            uintptr_t dstBase=(uintptr_t)bootMapping->getVirtualAddress();
+            uintptr_t srcBase=(uintptr_t)source->getVirtualAddress();
+            const uint32_t physW=(uint32_t)video.v_width, physH=(uint32_t)video.v_height;
+            uint32_t tile[32][32];
+            for(uint32_t by=0;by<physH;by+=32) {
+                const uint32_t th=(physH-by)<32?(physH-by):32;
+                for(uint32_t bx=0;bx<physW;bx+=32) {
+                    const uint32_t tw=(physW-bx)<32?(physW-bx):32;
+                    for(uint32_t tx=0;tx<tw;++tx) {
+                        const uint32_t sy=physW-1-(bx+tx);
+                        const uint32_t *in=reinterpret_cast<const uint32_t *>(srcBase+(uint64_t)sy*sourceStride)+by;
+                        for(uint32_t ty=0;ty<th;++ty)tile[ty][tx]=in[ty];
+                    }
+                    for(uint32_t ty=0;ty<th;++ty) {
+                        volatile uint32_t *out32=reinterpret_cast<volatile uint32_t *>(dstBase+(uint64_t)(by+ty)*video.v_rowBytes)+bx;
+                        uint32_t tx=0;
+                        if(((uintptr_t)out32 & 7U)==0U) {
+                            volatile uint64_t *out64=reinterpret_cast<volatile uint64_t *>(out32);
+                            const uint64_t *src64=reinterpret_cast<const uint64_t *>(tile[ty]);
+                            for(;tx+2<=tw;tx+=2)out64[tx/2]=src64[tx/2];
+                        }
+                        for(;tx<tw;++tx)out32[tx]=tile[ty][tx];
+                    }
+                }
+            }
+            stored=length;
+        } else {
             // Store only what changed since the previous frame (the scanout memory is slow device memory).
             uint64_t need=(uint64_t)width*height*4;
             static int diffOff=-1;
@@ -798,9 +891,14 @@ public:
         bool valid=mapping->getVirtualAddress() && mapping->getPhysicalAddress()==video.v_baseAddr &&
                    mapping->getLength()==video.v_rowBytes*video.v_height;
         if(valid) {
-            installBootDimensions((uint32_t)video.v_width,(uint32_t)video.v_height);
+            unsigned landscapeArg=0;
+            PE_parse_boot_argn("kenzo-landscape",&landscapeArg,sizeof(landscapeArg));
+            const bool landscape=(landscapeArg==1U && video.v_width<video.v_height);
+            const uint32_t logW=landscape?(uint32_t)video.v_height:(uint32_t)video.v_width;
+            const uint32_t logH=landscape?(uint32_t)video.v_width:(uint32_t)video.v_height;
+            installBootDimensions(logW,logH);
             uint32_t width=0,height=0;getDisplayDimensions(&width,&height);
-            valid=width==video.v_width && height==video.v_height;
+            valid=(width==logW && height==logH);
             if(valid) {
                 OSSafeReleaseNULL(bootMapping);bootMapping=mapping;mapping=nullptr;primary=video.v_display==1;
                 valid=native_legacy_gop_mapping_observed(this,bootMapping,width,height);
