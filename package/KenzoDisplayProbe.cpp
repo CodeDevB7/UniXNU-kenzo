@@ -33,6 +33,7 @@ void kenzo_backlight_start(void);
 void kenzo_backlight_set_display_power(bool on);
 void kenzo_input_start(void);
 void kenzo_gpu_probe_run(void);
+bool kenzo_gpu_kmd_fences(uint32_t *submitted, uint32_t *retired);
 extern volatile uint32_t kenzo_gpu_probe_state;
 extern volatile uint32_t kenzo_gpu_probe_diag[8];
 
@@ -216,8 +217,21 @@ void native_legacy_vsync_observed(unsigned, unsigned) {}
 
 // Optional Adreno/DPU/GPU-trace/boot-progress weak_import stubs (keep CPU GOP scanout path cleanly linked).
 volatile unsigned boot_progress_panel_top = 0;
-bool native_adreno_fences(uint32_t *, uint32_t *) { return false; }
-bool native_adreno_fences_detail(uint32_t *, uint32_t *, uint32_t *) { return false; }
+bool native_adreno_fences(uint32_t *submitted, uint32_t *retired)
+{
+    return kenzo_gpu_kmd_fences(submitted, retired);
+}
+bool native_adreno_fences_detail(uint32_t *submitted, uint32_t *retired, uint32_t *detail)
+{
+    if (detail) {
+        detail[0] = detail[1] = detail[2] = 0U;
+    }
+    const bool ok = kenzo_gpu_kmd_fences(submitted, retired);
+    if (detail) {
+        detail[2] = ok ? 2U : 0U;
+    }
+    return ok;
+}
 uint32_t native_ufs_dpu_map(unsigned, const uint64_t *, unsigned) { return 0; }
 volatile uint32_t native_ufs_dpu_state = 0;
 int native_gpu_trace_enabled(void) { return 0; }

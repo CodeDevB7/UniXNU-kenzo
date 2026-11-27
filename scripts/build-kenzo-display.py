@@ -292,19 +292,68 @@ public:
     cpufreq_src = ROOT / "kits/kenzo/KenzoCpuFreq.cpp"
     input_src = ROOT / "kits/kenzo/KenzoTouchButtons.cpp"
     gpu_probe_src = ROOT / "kits/kenzo/KenzoGpuProbe.cpp"
+    gpu_kmd_src = ROOT / "kits/kenzo/KenzoGpuKmd.cpp"
+    accel_src = ROOT / "kits/kenzo/KenzoAccelerator.cpp"
     hid_src = ROOT / "kits/kenzo/KenzoHidInput.cpp"
     hid_table_path = ROOT / "kits/kenzo/hid-input-bindings.json"
-    for req_p in (backlight_src, cpufreq_src, input_src, gpu_probe_src, hid_src, hid_table_path):
+    for req_p in (backlight_src, cpufreq_src, input_src, gpu_probe_src, gpu_kmd_src, accel_src, hid_src, hid_table_path):
         require(req_p.is_file(), f"Missing {req_p}")
 
     backlight_obj = OUT / "KenzoBacklight.o"
     cpufreq_obj = OUT / "KenzoCpuFreq.o"
     input_obj = OUT / "KenzoTouchButtons.o"
     gpu_probe_obj = OUT / "KenzoGpuProbe.o"
+    gpu_kmd_obj = OUT / "KenzoGpuKmd.o"
     compile_iokit_cpp(backlight_src, backlight_obj)
     compile_iokit_cpp(cpufreq_src, cpufreq_obj)
     compile_iokit_cpp(input_src, input_obj)
     compile_iokit_cpp(gpu_probe_src, gpu_probe_obj)
+    compile_iokit_cpp(gpu_kmd_src, gpu_kmd_obj)
+
+    # 4a0. Build late-staged AGXAccelerator subclassing verified iPadOS 17.7.11 IOAcceleratorES (136 B, 3 symbols)
+    accel_header = """// SPDX-License-Identifier: BSD-2-Clause-Patent
+#pragma once
+#include <IOKit/IOService.h>
+class IOAcceleratorES : public IOService {
+    OSDeclareAbstractStructors(IOAcceleratorES)
+};
+static_assert(sizeof(IOService) == 136 && sizeof(IOAcceleratorES) == 136, "iPadOS 17.7.11 IOAcceleratorES base size");
+"""
+    (OUT / "OriginalAcceleratorABI.h").write_text(accel_header)
+    accel_staged_src = OUT / "KenzoAccelerator.cpp"
+    shutil.copyfile(accel_src, accel_staged_src)
+    accel_obj = OUT / "KenzoAccelerator.o"
+    compile_iokit_cpp(accel_staged_src, accel_obj, extra_includes=(OUT,))
+
+    araw = accel_obj.read_bytes()
+    aimg = macho(araw)
+    ast = next(p for c, p, _ in aimg["commands"] if c == 2)
+    asy, acount, astrings, _ = struct.unpack_from("<4I", araw, ast + 8)
+    asyms = []
+    for ai in range(acount):
+        ix, kind, section, _, va = struct.unpack_from("<IBBHQ", araw, asy + ai * 16)
+        asyms.append((araw[astrings + ix:araw.index(b"\0", astrings + ix)].decode(), va, kind))
+    accel_bindings = {
+        "__ZN15IOAcceleratorESC2EPK11OSMetaClass": 0xFFFFFFF004BD3B20,
+        "__ZN15IOAcceleratorESD2Ev": 0xFFFFFFF004BD3B64,
+        "__ZN15IOAcceleratorES10gMetaClassE": 0xFFFFFFF006AEB688,
+    }
+    aundef = {n for n, _, k in asyms if k == 1 and "15IOAcceleratorES" in n}
+    amiss = aundef - set(accel_bindings)
+    require(not amiss and bool(aundef & set(accel_bindings)), f"Unexpected IOAcceleratorES imports: {sorted(amiss)}")
+    aasm = OUT / "accel-original-bindings.S"
+    aasm.write_text("".join(f".globl {n}\n.set {n}, {va:#x}\n" for n, va in sorted(accel_bindings.items()) if n in aundef))
+    run(["xcrun", "clang", "-target", TRIPLE, "-isysroot", sdk, "-c", aasm, "-o", OUT / "accel-original-bindings.o"])
+
+    accel_late = OUT / "KenzoAccelerator.late.o"
+    run([
+        objcopy,
+        "--remove-section=__DATA,__mod_init_func",
+        "--globalize-symbol=__GLOBAL__sub_I_KenzoAccelerator.cpp",
+        accel_obj, accel_late,
+    ])
+    require(text_section(araw, aimg) == text_section(accel_late.read_bytes(), macho(accel_late.read_bytes())),
+            "KenzoAccelerator __text unchanged by late-init staging")
 
     # 4a. Build 207-slot NativeHidInput (late-staged against verified iPadOS 17.7.11 IOHIDDevice ABI)
     hid_table = json.loads(hid_table_path.read_text())
@@ -447,7 +496,9 @@ public:
     run([
         "xcrun", "ar", "rcs", archive,
         late, OUT / "original-bindings.o", probe_obj, policy_obj,
-        backlight_obj, cpufreq_obj, input_obj, gpu_probe_obj, hid_late, OUT / "hid-original-bindings.o",
+        backlight_obj, cpufreq_obj, input_obj, gpu_probe_obj, gpu_kmd_obj,
+        accel_late, OUT / "accel-original-bindings.o",
+        hid_late, OUT / "hid-original-bindings.o",
         keyevents_late, gop_late,
     ])
 
@@ -463,6 +514,8 @@ public:
         cpufreq_src,
         input_src,
         gpu_probe_src,
+        gpu_kmd_src,
+        accel_src,
         hid_src,
         table_path,
         hid_table_path,

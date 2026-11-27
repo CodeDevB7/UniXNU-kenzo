@@ -29,13 +29,21 @@
 
 extern "C" {
 extern void flush_dcache64(addr64_t addr, unsigned count, int phys);
-volatile uint32_t kenzo_gpu_probe_state = 0; // 0=off,1=vdd,2=cx,3=gx,4=clk,5=Gate1_ALIVE,6=Gate2_SMMU,7=Gate3A_SECVID,8=Gate3B_PM4_OK!
+volatile uint32_t kenzo_gpu_probe_state = 0; // 0=off..5=Gate1_ALIVE,6=Gate2_SMMU,7=Gate3A_SECVID,8=Gate3B_PM4,9=Gate4_IB,A=KMD_LIVE!
 volatile uint32_t kenzo_gpu_probe_diag[8] = {};
 void kenzo_gpu_probe_run(void);
+bool kenzo_gpu_kmd_publish(uintptr_t gpuBase,
+                           IOBufferMemoryDescriptor *ringDesc,
+                           uint8_t *ringVa,
+                           uint32_t ringRegionBytes,
+                           const A510Ring *ringState,
+                           volatile uint32_t *fenceVa);
 }
 
-// Compile A510Metal's host-verified C core directly into this translation unit.
+// Compile A510Metal's host-verified C core with C linkage so KenzoGpuKmd.cpp can call it directly.
+extern "C" {
 #include "NativeAdrenoA510Core.c"
+}
 
 namespace {
 
@@ -385,11 +393,14 @@ static bool runGate3BSmoke(uintptr_t gpu, unsigned mode)
         (idle2St == A510_CORE_OK || gotFence >= 2U) &&
         gotScratch == 0xA510CAFEU && gotScratch2 == 0xA5101B01U) {
         kenzo_gpu_probe_state = 9U; // G9 = PHYSICAL ADRENO 510 INDIRECT BUFFER 0xA5101B01 + FENCE VERIFIED!
-        return true;
+        if (mode >= 7U) {
+            return kenzo_gpu_kmd_publish(gpu, dmaDesc, dmaVa, kDmaBytes, &ring, fenceVa);
+        }
+        return false;
     }
     if (initSt == A510_CORE_OK && (idleSt == A510_CORE_OK || gotFence >= 1U) && gotScratch == 0xA510CAFEU) {
         kenzo_gpu_probe_state = 8U; // G8 = PHYSICAL ADRENO 510 PM4 SMOKE WRITE 0xA510CAFE + FENCE VERIFIED!
-        return true;
+        return false;
     }
     return false;
 }
@@ -400,6 +411,11 @@ extern "C" void kenzo_gpu_probe_run(void)
 {
     unsigned mode = 0;
     PE_parse_boot_argn("kenzo-gpu-probe", &mode, sizeof(mode));
+    unsigned gpuEnable = 0;
+    PE_parse_boot_argn("kenzo-gpu", &gpuEnable, sizeof(gpuEnable));
+    if (gpuEnable != 0U && mode < 7U) {
+        mode = 7U;
+    }
     if (mode == 0U) {
         return;
     }
@@ -514,6 +530,17 @@ extern "C" void kenzo_gpu_probe_run(void)
     }
     wr32(gcc, kGccOxiliGxClamp, rd32(gcc, kGccOxiliGxClamp) & ~1U);
 
+    // Optional GPU clock boost at Nominal 965 mV (kenzo-gpu-clk=1: 200 MHz GPLL0/4, =2: 266 MHz GPLL0/3)
+    unsigned gpuClk = 0;
+    PE_parse_boot_argn("kenzo-gpu-clk", &gpuClk, sizeof(gpuClk));
+    if (gpuClk == 1U || gpuClk == 2U) {
+        const uint32_t cfgVal = (gpuClk == 2U) ? 0x00000105U : 0x00000107U; // GPLL0(800MHz): /3=266MHz or /4=200MHz
+        wr32(gcc, kGccGfx3dCfgRcgr, cfgVal);
+        wr32(gcc, kGccGfx3dCmdRcgr, rd32(gcc, kGccGfx3dCmdRcgr) | 1U);
+        for (uint32_t i = 0; i < 1000U && (rd32(gcc, kGccGfx3dCmdRcgr) & 1U); ++i) { IODelay(1); }
+        IOLog("KenzoGpuProbe: GPU clock boosted cfg=0x%x (%s)\n", cfgVal, (gpuClk == 2U) ? "266MHz" : "200MHz");
+    }
+
     // Step 3: Vote SMMU clocks (BIT 1,2,3,10,13,20) + record exact CBCR status + enable 6 Oxili clocks
     wr32(gcc, kGccApcsVote2, rd32(gcc, kGccApcsVote2) | kSmmuVoteBits);
     const uint32_t smmuHalts[6] = { 0x12018U, 0x12020U, 0x12010U, 0x12034U, 0x12044U, 0x1209CU };
@@ -572,6 +599,7 @@ extern "C" void kenzo_gpu_probe_run(void)
     IOLog("KenzoGpuProbe: SCM restore_sec_cfg(0x12,0) ret=%lld r1=0x%llx\n",
           static_cast<long long>(scmRet), static_cast<unsigned long long>(scmR1));
 
+    bool keepGpuMap = false;
     if (mode == 3U && scmRet == 0LL) {
         // Optional TZ IOMMU_SECURE_PTBL_SIZE (0x02000C03) / PTBL_INIT (0x02000C04) (kenzo-gpu-smmu-ptbl=1/2/3)
         unsigned smmuPtbl = 0;
@@ -643,11 +671,13 @@ extern "C" void kenzo_gpu_probe_run(void)
         IOLog("KenzoGpuProbe: Gate3A SECVID 0x%x->0x%x STATUS3=0x%x CP_CNTL=0x%x\n",
               secBefore, secAfter, st3, cpCtl);
     } else if (mode >= 5U && delta > 0ULL) {
-        // Gate #3B (mode=5) & Gate #4 IB (mode=6)
-        (void)runGate3BSmoke(gpu, mode);
+        // Gate #3B (mode=5), Gate #4 IB (mode=6), & Full AGXAccelerator KMD publish (mode=7 / kenzo-gpu=1)
+        keepGpuMap = runGate3BSmoke(gpu, mode);
     }
 
     gccMap->release();
-    gpuMap->release();
+    if (!keepGpuMap) {
+        gpuMap->release();
+    }
     smmuMap->release();
 }
