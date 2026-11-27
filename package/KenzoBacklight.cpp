@@ -44,8 +44,6 @@ constexpr uint32_t kFadeStepMs   = 16U;
 
 const OSMetaClass *gAppleBacklightClass = nullptr;
 volatile uint32_t gImpersonating = 0;
-class KenzoBacklight;
-KenzoBacklight *gKenzoBacklight = nullptr;
 volatile uint32_t gDisplayPowerOn = 1U;
 
 } // namespace
@@ -79,6 +77,10 @@ private:
     static void onTimer(OSObject *owner, IOTimerEventSource *sender);
     void handleTimer();
 };
+
+namespace {
+KenzoBacklight *gKenzoBacklight = nullptr;
+} // namespace
 
 // Custom getMetaClass so CoreBrightness / IOPMrootDomain match AppleARMBacklight
 // without colliding with AppleARMPlatform's existing AppleARMBacklight class name.
