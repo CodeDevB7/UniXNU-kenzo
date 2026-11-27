@@ -194,18 +194,41 @@ extern "C" void kenzo_gpu_probe_run(void)
     (void)enableCbcr(gcc, kGccOxiliAon);
 
     // Step 2: Kenzo DTB /soc/qcom,gdsc@185901c requires qcom,enable-root-clk (gfx3d_clk_src ROOT_EN)!
-    // Force GFX3D RCG onto safe XO 19.2 MHz (cfg=0), UPDATE (BIT0), and ROOT_EN (BIT1) before enabling GX GDSC.
+    // Ensure Oxili BCR (0x59014) is deasserted, clear CLAMP_IO (0x5B00C), and bring up gfx3d_clk_src.
+    constexpr uint32_t kGccOxiliBcr = 0x59014U;
+    if (rd32(gcc, kGccOxiliBcr) & 1U) {
+        wr32(gcc, kGccOxiliBcr, rd32(gcc, kGccOxiliBcr) & ~1U);
+        IODelay(20);
+    }
+    wr32(gcc, kGccOxiliGxClamp, rd32(gcc, kGccOxiliGxClamp) & ~1U);
+
+    // Start gfx3d_clk_src on safe XO 19.2 MHz (cfg=0), UPDATE (BIT0), and ROOT_EN (BIT1).
     wr32(gcc, kGccGfx3dCfgRcgr, 0U);
     wr32(gcc, kGccGfx3dCmdRcgr, rd32(gcc, kGccGfx3dCmdRcgr) | 1U);
     for (uint32_t i = 0; i < 1000U && (rd32(gcc, kGccGfx3dCmdRcgr) & 1U); ++i) { IODelay(1); }
     wr32(gcc, kGccGfx3dCmdRcgr, rd32(gcc, kGccGfx3dCmdRcgr) | 2U); // ROOT_EN
     for (uint32_t i = 0; i < 1000U && (rd32(gcc, kGccGfx3dCmdRcgr) & (1U << 31)); ++i) { IODelay(1); }
 
-    // Step 3: Enable gdsc_oxili_gx (0x5901C) and clear CLAMP_IO (0x5B00C)
-    if (!enableGdsc(gcc, kGccOxiliGxGdscr)) {
+    // Step 3: Enable gdsc_oxili_gx (0x5901C). If XO did not bring up PWR_ON, retry on GPLL0/16 (50 MHz, cfg=0x11F)
+    // and assert FORCE_MEM_CORE_ON on gcc_oxili_gfx3d_clk (0x59020) + gcc_oxili_gmem_clk (0x59024).
+    bool gxOk = enableGdsc(gcc, kGccOxiliGxGdscr);
+    if (!gxOk) {
+        wr32(gcc, kGccGfx3dCfgRcgr, 0x0000011FU); // GPLL0 (src=1, 800 MHz) / 16 = 50 MHz (from Kenzo ftbl)
+        wr32(gcc, kGccGfx3dCmdRcgr, rd32(gcc, kGccGfx3dCmdRcgr) | 1U);
+        for (uint32_t i = 0; i < 1000U && (rd32(gcc, kGccGfx3dCmdRcgr) & 1U); ++i) { IODelay(1); }
+        wr32(gcc, kGccGfx3dCmdRcgr, rd32(gcc, kGccGfx3dCmdRcgr) | 2U);
+        wr32(gcc, kGccOxiliGfx3d, rd32(gcc, kGccOxiliGfx3d) | (1U << 14));
+        wr32(gcc, kGccOxiliGmem, rd32(gcc, kGccOxiliGmem) | (1U << 14));
+        gxOk = enableGdsc(gcc, kGccOxiliGxGdscr);
+    }
+    kenzo_gpu_probe_diag[1] = rd32(gcc, kGccOxiliCxGdscr);
+    kenzo_gpu_probe_diag[2] = rd32(gcc, kGccOxiliGxGdscr);
+    kenzo_gpu_probe_diag[7] = rd32(gcc, kGccGfx3dCmdRcgr);
+    if (!gxOk) {
         kenzo_gpu_probe_state = 3U;
-        IOLog("KenzoGpuProbe: GX GDSC timeout GX=0x%x CMD_RCGR=0x%x CLAMP=0x%x\n",
-              rd32(gcc, kGccOxiliGxGdscr), rd32(gcc, kGccGfx3dCmdRcgr), rd32(gcc, kGccOxiliGxClamp));
+        IOLog("KenzoGpuProbe: GX GDSC timeout GX=0x%x CMD_RCGR=0x%x CLAMP=0x%x BCR=0x%x\n",
+              rd32(gcc, kGccOxiliGxGdscr), rd32(gcc, kGccGfx3dCmdRcgr),
+              rd32(gcc, kGccOxiliGxClamp), rd32(gcc, kGccOxiliBcr));
         gccMap->release(); gpuMap->release(); smmuMap->release();
         return;
     }

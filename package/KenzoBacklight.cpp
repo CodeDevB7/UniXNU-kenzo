@@ -38,6 +38,7 @@ constexpr uint8_t kRegBright0Lsb = 0x57U; // 0xD957..0xD958
 constexpr uint8_t kRegBright1Lsb = 0x67U; // 0xD967..0xD968
 
 constexpr uint32_t kMaxLevel     = 4095U;
+constexpr uint32_t kMinVisible   = 48U;   // ~1.2% floor so Control Center 0% slider stays dimly visible
 constexpr uint32_t kFadeStepMs   = 16U;
 
 const OSMetaClass *gAppleBacklightClass = nullptr;
@@ -144,7 +145,7 @@ void KenzoBacklight::publishLevel(uint32_t level)
 {
     OSDictionary *params = OSDictionary::withCapacity(1);
     OSDictionary *brt = OSDictionary::withCapacity(3);
-    OSNumber *nMin = OSNumber::withNumber(0ULL, 32);
+    OSNumber *nMin = OSNumber::withNumber(kMinVisible, 32);
     OSNumber *nMax = OSNumber::withNumber(kMaxLevel, 32);
     OSNumber *nVal = OSNumber::withNumber(level, 32);
     if (params && brt && nMin && nMax && nVal) {
@@ -209,11 +210,19 @@ IOReturn KenzoBacklight::setProperties(OSObject *properties)
             goal = 0;
         } else {
             const int64_t scaled = (static_cast<int64_t>(val) * static_cast<int64_t>(kMaxLevel)) / (500LL << 16);
-            goal = scaled < 1 ? 1U : (scaled > kMaxLevel ? kMaxLevel : static_cast<uint32_t>(scaled));
+            goal = scaled < static_cast<int64_t>(kMinVisible) ? kMinVisible
+                 : (scaled > kMaxLevel ? kMaxLevel : static_cast<uint32_t>(scaled));
         }
     } else if (OSNumber *brightness = OSDynamicCast(OSNumber, dict->getObject("brightness"))) {
         const int32_t requested = static_cast<int32_t>(brightness->unsigned32BitValue());
-        goal = requested < 0 ? 0U : (static_cast<uint32_t>(requested) > kMaxLevel ? kMaxLevel : static_cast<uint32_t>(requested));
+        if (requested <= 0) {
+            // Power-button sleep sends FadePeriod (or brightness=0); Control Center 0% sends no FadePeriod or min level.
+            goal = dict->getObject("FadePeriod") ? 0U : kMinVisible;
+        } else if (static_cast<uint32_t>(requested) < kMinVisible) {
+            goal = kMinVisible;
+        } else {
+            goal = static_cast<uint32_t>(requested) > kMaxLevel ? kMaxLevel : static_cast<uint32_t>(requested);
+        }
         if (OSNumber *fade = OSDynamicCast(OSNumber, dict->getObject("FadePeriod"))) {
             uint64_t fms = (static_cast<uint64_t>(fade->unsigned32BitValue()) * 1000ULL) >> 16;
             if (fms > 5000ULL) {
