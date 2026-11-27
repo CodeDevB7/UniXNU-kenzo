@@ -26,7 +26,7 @@ namespace {
 constexpr uint64_t kGccPhys         = 0x01800000ULL;
 constexpr uint64_t kGccSize         = 0x00080000ULL;
 constexpr uint64_t kGpuRegPhys      = 0x01C00000ULL;
-constexpr uint64_t kGpuRegSize      = 0x00004000ULL;
+constexpr uint64_t kGpuRegSize      = 0x00040000ULL;
 constexpr uint64_t kMemAccGfxPhys   = 0x01944000ULL; // +0x130 MEM_ACC_GFX
 constexpr uint64_t kSmmuPhys        = 0x01F00000ULL;
 constexpr uint64_t kSmmuSize        = 0x00010000ULL;
@@ -46,7 +46,14 @@ constexpr uint32_t kGccOxiliAon     = 0x59044U;
 constexpr uint32_t kGccBimcGfx      = 0x59048U;
 
 constexpr uint32_t kGccApcsVote2    = 0x4500CU;
-constexpr uint32_t kSmmuVoteBits    = (1U << 2) | (1U << 3) | (1U << 13) | (1U << 19);
+// Verified from stock Kenzo kernel (0x148eb5c..0x148f7f4):
+//   BIT(1)  = gcc_apss_tcu_clk  (0x12018)
+//   BIT(2)  = gcc_gfx_tcu_clk   (0x12020)
+//   BIT(3)  = gcc_gfx_tbu_clk   (0x12010)
+//   BIT(12) = gcc_smmu_cfg_clk  (0x12038) <-- REQUIRED iface_clk for 0x01F00000 gfx_iommu!
+//   BIT(13) = gcc_gtcu_ahb_clk  (0x12044)
+//   BIT(19) = gcc_gfx_1_tbu_clk (0x12098)
+constexpr uint32_t kSmmuVoteBits    = (1U << 1) | (1U << 2) | (1U << 3) | (1U << 12) | (1U << 13) | (1U << 19);
 
 // Adreno 510 byte offsets (dword index * 4)
 constexpr uint32_t kRbbmAlwaysOnLo  = 0x004D2U * 4U;
@@ -234,10 +241,10 @@ extern "C" void kenzo_gpu_probe_run(void)
     }
     wr32(gcc, kGccOxiliGxClamp, rd32(gcc, kGccOxiliGxClamp) & ~1U);
 
-    // Step 4: Vote SMMU clocks + enable remaining Oxili branch clocks
+    // Step 4: Vote SMMU clocks (including BIT12 gcc_smmu_cfg_clk!) + enable remaining Oxili branch clocks
     wr32(gcc, kGccApcsVote2, rd32(gcc, kGccApcsVote2) | kSmmuVoteBits);
-    const uint32_t smmuHalts[4] = { 0x12020U, 0x12010U, 0x12044U, 0x12098U };
-    for (unsigned i = 0; i < 4U; ++i) {
+    const uint32_t smmuHalts[6] = { 0x12018U, 0x12020U, 0x12010U, 0x12038U, 0x12044U, 0x12098U };
+    for (unsigned i = 0; i < 6U; ++i) {
         for (uint32_t s = 0; s < 500U && (rd32(gcc, smmuHalts[i]) & (1U << 31)); ++s) { IODelay(10); }
     }
     const uint32_t clks[6] = {
@@ -259,19 +266,23 @@ extern "C" void kenzo_gpu_probe_run(void)
     const uint64_t t1 = readAlwaysOn(gpu);
     const uint64_t delta = t1 - t0;
 
+    kenzo_gpu_probe_diag[3] = rbbmSt;
+    kenzo_gpu_probe_diag[4] = static_cast<uint32_t>(delta);
+    kenzo_gpu_probe_state = (delta > 0ULL) ? 5U : 4U;
+
+    IOLog("KenzoGpuProbe: Gate1 Adreno510 %s! rbbm=0x%x aon_delta=%llu ticks/ms\n",
+          (delta > 0ULL) ? "ALIVE" : "STUCK", rbbmSt,
+          static_cast<unsigned long long>(delta));
+
     // Gate #2: SMMUv2 Non-Secure Context Banks CB0 (0x8000) & CB2 (0xA000)
     const uint32_t cb0Sctlr = rd32(smmu, 0x8000U);
     const uint32_t cb2Sctlr = rd32(smmu, 0xA000U);
-
-    kenzo_gpu_probe_diag[3] = rbbmSt;
-    kenzo_gpu_probe_diag[4] = static_cast<uint32_t>(delta);
     kenzo_gpu_probe_diag[5] = cb0Sctlr;
     kenzo_gpu_probe_diag[6] = cb2Sctlr;
-    kenzo_gpu_probe_state = (delta > 0ULL) ? 5U : 4U;
-
-    IOLog("KenzoGpuProbe: Adreno510 %s! rbbm=0x%x aon_delta=%llu ticks/ms CB0=0x%x CB2=0x%x\n",
-          (delta > 0ULL) ? "ALIVE" : "STUCK", rbbmSt,
-          static_cast<unsigned long long>(delta), cb0Sctlr, cb2Sctlr);
+    if (delta > 0ULL) {
+        kenzo_gpu_probe_state = 6U; // G6 = BOTH Gate #1 (Adreno 510 ALIVE) & Gate #2 (SMMU CB0/CB2) PASSED!
+    }
+    IOLog("KenzoGpuProbe: Gate2 SMMU CB0=0x%x CB2=0x%x\n", cb0Sctlr, cb2Sctlr);
 
     gccMap->release();
     gpuMap->release();
