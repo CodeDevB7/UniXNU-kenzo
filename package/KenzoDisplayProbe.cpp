@@ -139,10 +139,10 @@ void native_legacy_frame_observed(unsigned kind, uint64_t count,
 {
     const uint32_t n = __atomic_add_fetch(&kenzo_display_frames, 1U, __ATOMIC_RELAXED);
     if (n == 1U || n == 24U) {
-        IOLog("KenzoGpuProbe: st=%u mv=%u cx=0x%x gx=0x%x rcg=0x%x rbbm=0x%x aon=%u cb0=0x%x\n",
-              kenzo_gpu_probe_state, kenzo_gpu_probe_diag[0], kenzo_gpu_probe_diag[1],
-              kenzo_gpu_probe_diag[2], kenzo_gpu_probe_diag[7], kenzo_gpu_probe_diag[3],
-              kenzo_gpu_probe_diag[4], kenzo_gpu_probe_diag[5]);
+        IOLog("KenzoGpuProbe: st=%u mv=%u rbbm=0x%x aon=%u d5=0x%x d6=0x%x d7=0x%x\n",
+              kenzo_gpu_probe_state, kenzo_gpu_probe_diag[0], kenzo_gpu_probe_diag[3],
+              kenzo_gpu_probe_diag[4], kenzo_gpu_probe_diag[5], kenzo_gpu_probe_diag[6],
+              kenzo_gpu_probe_diag[7]);
     }
     if (n <= 8U) {
         IOLog("KenzoDisplayProbe: frame #%u kind=%u lit=%llu (%llu,%llu)-(%llu,%llu)\n",
