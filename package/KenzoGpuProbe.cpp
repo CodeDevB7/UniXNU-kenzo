@@ -46,14 +46,14 @@ constexpr uint32_t kGccOxiliAon     = 0x59044U;
 constexpr uint32_t kGccBimcGfx      = 0x59048U;
 
 constexpr uint32_t kGccApcsVote2    = 0x4500CU;
-// Verified from stock Kenzo kernel (0x148eb5c..0x148f7f4):
-//   BIT(1)  = gcc_apss_tcu_clk  (0x12018)
-//   BIT(2)  = gcc_gfx_tcu_clk   (0x12020)
-//   BIT(3)  = gcc_gfx_tbu_clk   (0x12010)
-//   BIT(12) = gcc_smmu_cfg_clk  (0x12038) <-- REQUIRED iface_clk for 0x01F00000 gfx_iommu!
-//   BIT(13) = gcc_gtcu_ahb_clk  (0x12044)
-//   BIT(19) = gcc_gfx_1_tbu_clk (0x12098)
-constexpr uint32_t kSmmuVoteBits    = (1U << 1) | (1U << 2) | (1U << 3) | (1U << 12) | (1U << 13) | (1U << 19);
+// 100% silicon-verified directly from stock Kenzo boot.img (0x148eb5c..0x148f7f4):
+//   BIT(1)  = gcc_gfx_tcu_clk   (0x12018)
+//   BIT(2)  = gcc_gfx_tbu_clk   (0x12020)
+//   BIT(3)  = gcc_gfx_1_tbu_clk (0x12010)
+//   BIT(10) = gcc_gtcu_ahb_clk  (0x12034)
+//   BIT(13) = gcc_apss_tcu_clk  (0x12044)
+//   BIT(20) = gcc_smmu_cfg_clk  (0x1209C) <-- REQUIRED iface_clk for 0x01F00000 gfx_iommu!
+constexpr uint32_t kSmmuVoteBits    = (1U << 1) | (1U << 2) | (1U << 3) | (1U << 10) | (1U << 13) | (1U << 20);
 
 // Adreno 510 byte offsets (dword index * 4)
 constexpr uint32_t kRbbmAlwaysOnLo  = 0x004D2U * 4U;
@@ -278,9 +278,9 @@ extern "C" void kenzo_gpu_probe_run(void)
     }
     wr32(gcc, kGccOxiliGxClamp, rd32(gcc, kGccOxiliGxClamp) & ~1U);
 
-    // Step 4: Vote SMMU clocks (including BIT12 gcc_smmu_cfg_clk!) + enable remaining Oxili branch clocks
+    // Step 4: Vote SMMU clocks (including BIT20 gcc_smmu_cfg_clk + BIT10 gcc_gtcu_ahb_clk!) + enable Oxili clocks
     wr32(gcc, kGccApcsVote2, rd32(gcc, kGccApcsVote2) | kSmmuVoteBits);
-    const uint32_t smmuHalts[6] = { 0x12018U, 0x12020U, 0x12010U, 0x12038U, 0x12044U, 0x12098U };
+    const uint32_t smmuHalts[6] = { 0x12018U, 0x12020U, 0x12010U, 0x12034U, 0x12044U, 0x1209CU };
     for (unsigned i = 0; i < 6U; ++i) {
         for (uint32_t s = 0; s < 500U && (rd32(gcc, smmuHalts[i]) & (1U << 31)); ++s) { IODelay(10); }
     }
