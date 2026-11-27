@@ -24,7 +24,10 @@
 #include <IOKit/IOService.h>
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOWorkLoop.h>
+#include <libkern/c++/OSBoolean.h>
+#include <libkern/c++/OSIterator.h>
 #include <libkern/c++/OSMetaClass.h>
+#include <libkern/c++/OSNumber.h>
 #include <mach/kmod.h>
 #include <pexpert/pexpert.h>
 #include <stdint.h>
@@ -76,7 +79,55 @@ void native_hid_input_observed(unsigned event, int status)
     }
 }
 
-void native_hid_live_checkpoint(IOService *) {}
+static bool stampTouchUsageRecursive(IORegistryEntry *entry, unsigned depth)
+{
+    if (!entry || depth == 0U) {
+        return false;
+    }
+    bool foundDriver = false;
+    if (entry->metaCast("IOHIDEventDriver") || entry->metaCast("IOHIDInterface")) {
+        OSNumber *page = OSNumber::withNumber(0x0DULL, 32);
+        OSNumber *usage = OSNumber::withNumber(0x04ULL, 32);
+        if (page && usage) {
+            entry->setProperty("Built-In", kOSBooleanTrue);
+            entry->setProperty("DisplayIntegrated", kOSBooleanTrue);
+            entry->setProperty("DigitizerCollectionDispatch", kOSBooleanTrue);
+            entry->setProperty("PrimaryUsagePage", page);
+            entry->setProperty("PrimaryUsage", usage);
+        }
+        OSSafeReleaseNULL(page);
+        OSSafeReleaseNULL(usage);
+        if (entry->metaCast("IOHIDEventDriver")) {
+            foundDriver = true;
+        }
+    }
+    OSIterator *it = entry->getChildIterator(gIOServicePlane);
+    if (it) {
+        while (OSObject *child = it->getNextObject()) {
+            IORegistryEntry *ce = OSDynamicCast(IORegistryEntry, child);
+            if (ce && stampTouchUsageRecursive(ce, depth - 1U)) {
+                foundDriver = true;
+            }
+        }
+        it->release();
+    }
+    return foundDriver;
+}
+
+void native_hid_live_checkpoint(IOService *device)
+{
+    static volatile uint32_t stamped = 0;
+    if (!device || __atomic_load_n(&stamped, __ATOMIC_ACQUIRE) != 0U) {
+        return;
+    }
+    if (stampTouchUsageRecursive(device, 4U)) {
+        __atomic_store_n(&stamped, 1U, __ATOMIC_RELEASE);
+        if (kenzo_touch_status == 2U) {
+            kenzo_touch_status = 3U; // 3 = IOHIDEventDriver stamped as PrimaryUsagePage=0x0D/4 for backboardd!
+        }
+        IOLog("KenzoHidInput: stamped IOHIDEventDriver as Built-In Digitizer/Touch Screen (0x0D/4)\n");
+    }
+}
 
 bool native_hid_input_requested(void)
 {
@@ -716,31 +767,19 @@ extern "C" void kenzo_input_start(void)
         IOLog("KenzoHidInput: kext load HIDFamily=0x%x EventDriver=0x%x\n",
               static_cast<unsigned>(kr1), static_cast<unsigned>(kr2));
         if (kr1 == KERN_SUCCESS && registerHidLateClass()) {
-            // 1. Combined keyboard/consumer buttons service (Power, VolUp, VolDown, Home)
+            // Combined keyboard + consumer buttons + 10-finger digitizer service:
+            // keyboard collection matches in-kernel IOHIDEventDriver (dk=0), and
+            // native_hid_live_checkpoint stamps PrimaryUsagePage=0x0D/4 for backboardd!
             IOService *hid = native_hid_input_allocate();
             if (hid && hid->init(nullptr) && hid->attach(parent)) {
                 if (hid->start(parent)) {
                     hid->registerService();
-                    IOLog("KenzoHidInput: NativeHidInput (buttons) registered\n");
+                    IOLog("KenzoHidInput: NativeHidInput (combined buttons+touch) registered\n");
                 } else {
                     hid->detach(parent);
                 }
             }
             OSSafeReleaseNULL(hid);
-
-            // 2. Dedicated Built-In Digitizer/Touch Screen service so backboardd binds multitouch
-            if (tsEn == 1U) {
-                IOService *touchHid = native_hid_touch_allocate();
-                if (touchHid && touchHid->init(nullptr) && touchHid->attach(parent)) {
-                    if (touchHid->start(parent)) {
-                        touchHid->registerService();
-                        IOLog("KenzoHidInput: NativeHidInput (touch digitizer) registered\n");
-                    } else {
-                        touchHid->detach(parent);
-                    }
-                }
-                OSSafeReleaseNULL(touchHid);
-            }
         }
     }
 

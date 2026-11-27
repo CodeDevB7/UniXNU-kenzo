@@ -402,8 +402,10 @@ public:
         size_t size;
         if(touchOnly){size=sizeof(touchDescriptor);memcpy(combined,touchDescriptor,size);}
         else{
-            // Buttons/keyboard device keeps pure keyboard+consumer descriptor while separate touchOnly service owns Digitizer.
+            // Combined device: keyboard collection first (matches in-kernel IOHIDEventDriver with dk=0),
+            // digitizer second (native_hid_live_checkpoint stamps PrimaryUsagePage=0x0D/4 on IOHIDEventDriver).
             size=sizeof(descriptor);memcpy(combined,descriptor,size);
+            if(touchEnabled){memcpy(combined+size,touchDescriptor,sizeof(touchDescriptor));size+=sizeof(touchDescriptor);}
         }
         *out=IOBufferMemoryDescriptor::withBytes(combined,size,kIODirectionNone);
         return *out?kIOReturnSuccess:kIOReturnNoMemory;
@@ -451,7 +453,7 @@ public:
         // report's fingers as one digitizer collection with a child per finger. Without it a touch screen gets one event per finger,
         // and backboardd takes each as the whole touch set, so no two fingers are ever down together for UIKit (no pinch, no
         // multi-finger or system gestures).
-        if(touchOnly){setProperty("Built-In",true);setProperty("DisplayIntegrated",true);setProperty("DigitizerCollectionDispatch",true);}
+        if(touchOnly||touchEnabled){setProperty("Built-In",true);setProperty("DisplayIntegrated",true);setProperty("DigitizerCollectionDispatch",true);}
 #if defined(XNU_TARGET_OS_OSX) && XNU_TARGET_OS_OSX
         // macOS: WindowServer ties a digitizer to the display whose container ID equals the digitizer's kUSBContainerID (a UUID string,
         // read up the service plane as from a USB device); the built-in display publishes that ID in its EDID (NativeLegacyDisplay.cpp).
@@ -462,11 +464,10 @@ public:
         if(!timer || inputLoop->addEventSource(timer)!=kIOReturnSuccess) {
             OSSafeReleaseNULL(timer);IOHIDDevice::stop(provider);return false;
         }
-        if(touchOnly){
+        if(touchOnly||touchEnabled){
             if(&native_touch_set_sink)native_touch_set_sink(&NativeHidInput::touchNotify,this);
-        } else {
-            if(&native_buttons_set_sink)native_buttons_set_sink(&NativeHidInput::buttonsNotify,this);
         }
+        if(!touchOnly && &native_buttons_set_sink)native_buttons_set_sink(&NativeHidInput::buttonsNotify,this);
         setProperty("OfflineInputProbe",true);
         native_hid_input_observed(2,0);
         timer->setTimeoutMS(1000);return true;
