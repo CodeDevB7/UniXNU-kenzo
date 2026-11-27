@@ -72,7 +72,7 @@ constexpr uint32_t kTunnelMagic   = 0x4E544E4CU; // 'NTNL'
 constexpr uint32_t kTunnelProbe   = 0xFFFFFFFFU;
 
 constexpr uint64_t kMaxBoBytes    = 64ULL * 1024ULL * 1024ULL; // 64 MiB max per BO on 2 GiB Kenzo
-constexpr uint32_t kMaxClientBos  = 128U;
+constexpr uint32_t kMaxClientBos  = 256U;
 constexpr uint32_t kMaxQueues     = 16U;
 
 struct GpuHwGlobal {
@@ -156,20 +156,20 @@ static uint32_t pollFenceHardware()
 }
 
 struct KmdClientBo {
-    bool inUse = false;
-    bool imported = false;
-    bool bounced = false;
-    bool mapped = false;
-    bool cpuMapped = false;
-    uint64_t handle = 0;
-    uint64_t bytes = 0;
-    uint64_t pa = 0;
-    uint32_t cpuToken = 0;
-    IOBufferMemoryDescriptor *dmaDesc = nullptr; // Backing buffer (owned or bounce)
-    IOMemoryDescriptor *userDesc = nullptr;      // Wired user range (for imported BOs)
-    uint8_t *dmaVa = nullptr;
-    uint32_t metaLen = 0;
-    char meta[NativeAdrenoAbiMetadataBytes] = {};
+    bool inUse;
+    bool imported;
+    bool bounced;
+    bool mapped;
+    bool cpuMapped;
+    uint64_t handle;
+    uint64_t bytes;
+    uint64_t pa;
+    uint32_t cpuToken;
+    IOBufferMemoryDescriptor *dmaDesc; // Backing buffer (owned or bounce)
+    IOMemoryDescriptor *userDesc;      // Wired user range (for imported BOs)
+    uint8_t *dmaVa;
+    uint32_t metaLen;
+    char meta[NativeAdrenoAbiMetadataBytes];
 };
 
 struct KmdClientQueue {
@@ -220,7 +220,7 @@ private:
     uint32_t prioBg = 3U;
     uint32_t metaLen = 0;
     char clientMeta[NativeAdrenoAbiMetadataBytes] = {};
-    KmdClientBo bos[kMaxClientBos] = {};
+    KmdClientBo *bos = nullptr;
     KmdClientQueue queues[kMaxQueues] = {};
 
     KmdClientBo *findBo(uint64_t handle);
@@ -247,12 +247,18 @@ bool AGXDeviceUserClient::initWithTask(task_t owningTask,
     if (!clientLock) {
         return false;
     }
+    bos = IONewZero(KmdClientBo, kMaxClientBos);
+    if (!bos) {
+        IOLockFree(clientLock);
+        clientLock = nullptr;
+        return false;
+    }
     return true;
 }
 
 KmdClientBo *AGXDeviceUserClient::findBo(uint64_t handle)
 {
-    if (handle == 0ULL) {
+    if (!bos || handle == 0ULL) {
         return nullptr;
     }
     for (uint32_t i = 0; i < kMaxClientBos; ++i) {
@@ -265,6 +271,9 @@ KmdClientBo *AGXDeviceUserClient::findBo(uint64_t handle)
 
 KmdClientBo *AGXDeviceUserClient::allocSlot()
 {
+    if (!bos) {
+        return nullptr;
+    }
     for (uint32_t i = 0; i < kMaxClientBos; ++i) {
         if (!bos[i].inUse) {
             return &bos[i];
@@ -301,14 +310,16 @@ void AGXDeviceUserClient::releaseBo(KmdClientBo *bo)
         bo->userDesc->release();
         bo->userDesc = nullptr;
     }
-    *bo = KmdClientBo{};
+    memset(bo, 0, sizeof(*bo));
 }
 
 void AGXDeviceUserClient::releaseAllBos()
 {
-    for (uint32_t i = 0; i < kMaxClientBos; ++i) {
-        if (bos[i].inUse) {
-            releaseBo(&bos[i]);
+    if (bos) {
+        for (uint32_t i = 0; i < kMaxClientBos; ++i) {
+            if (bos[i].inUse) {
+                releaseBo(&bos[i]);
+            }
         }
     }
     memset(queues, 0, sizeof(queues));
@@ -316,6 +327,9 @@ void AGXDeviceUserClient::releaseAllBos()
 
 void AGXDeviceUserClient::syncImportedToDma()
 {
+    if (!bos) {
+        return;
+    }
     for (uint32_t i = 0; i < kMaxClientBos; ++i) {
         KmdClientBo &bo = bos[i];
         if (!bo.inUse) {
@@ -332,6 +346,9 @@ void AGXDeviceUserClient::syncImportedToDma()
 
 void AGXDeviceUserClient::syncDmaToImported()
 {
+    if (!bos) {
+        return;
+    }
     for (uint32_t i = 0; i < kMaxClientBos; ++i) {
         KmdClientBo &bo = bos[i];
         if (!bo.inUse || !bo.dmaVa) {
@@ -364,6 +381,10 @@ void AGXDeviceUserClient::free()
         IOLockFree(clientLock);
         clientLock = nullptr;
     }
+    if (bos) {
+        IODelete(bos, KmdClientBo, kMaxClientBos);
+        bos = nullptr;
+    }
     IOUserClient::free();
 }
 
@@ -371,7 +392,7 @@ IOReturn AGXDeviceUserClient::clientMemoryForType(UInt32 type,
                                                   IOOptionBits *options,
                                                   IOMemoryDescriptor **memory)
 {
-    if (!memory || !clientLock || handoffOnly || type == 0U) {
+    if (!memory || !clientLock || !bos || handoffOnly || type == 0U) {
         return kIOReturnBadArgument;
     }
     *memory = nullptr;
