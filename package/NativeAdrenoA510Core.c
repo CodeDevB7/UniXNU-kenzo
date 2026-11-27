@@ -146,10 +146,14 @@ A510CoreStatus a510_hw_init(const A510CoreOps *ops, A510Ring *ring, const A510Hw
     gpu_w32(ops, A510_RBBM_AHB_CNTL2, 0x0000003fu);
     gpu_w32(ops, A510_TPL1_MODE_CNTL, (A510_HIGHEST_BANK_BIT - 13u) << 7);
 
-    /* 5. CP_PROTECT register windows (0..17) */
-    gpu_w32(ops, A510_CP_PROTECT_CNTL, 0x00000007u);
-    for (uint32_t i = 0; i < NATIVE_ADRENO_A510_PROTECT_COUNT; ++i) {
-        gpu_w32(ops, A510_CP_PROTECT + NativeAdrenoA510Protect[i][0], NativeAdrenoA510Protect[i][1]);
+    /* 5. CP_PROTECT register windows (0..16; LAST_SPAN_INF_RANGE bit 2 cleared because slot 17 is unused) */
+    if (!cfg->skip_cp_protect) {
+        gpu_w32(ops, A510_CP_PROTECT_CNTL, 0x00000003u);
+        for (uint32_t i = 0; i < NATIVE_ADRENO_A510_PROTECT_COUNT; ++i) {
+            gpu_w32(ops, A510_CP_PROTECT + NativeAdrenoA510Protect[i][0], NativeAdrenoA510Protect[i][1]);
+        }
+    } else {
+        gpu_w32(ops, A510_CP_PROTECT_CNTL, 0u);
     }
 
     /* 6. Disable TSB secure range & put all 12 A510 blocks into 64-bit addressing mode */

@@ -62,6 +62,7 @@ typedef struct {
      * (no ZAP shader). Kept opt-in so physical bring-up can test EL1 access safely. */
     bool clear_secvid_trust_cntl;
     bool skip_hwcg;
+    bool skip_cp_protect;
 } A510HwInitConfig;
 
 typedef struct {

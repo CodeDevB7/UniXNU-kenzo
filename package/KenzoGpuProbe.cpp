@@ -284,20 +284,23 @@ static bool runGate3BSmoke(uintptr_t gpu, unsigned mode)
                          dmaPa + kRptrOff,
                          dmaPa + kFenceOff);
 
-    unsigned noSecvid = 0, noHwcg = 0, noIrq = 0, noEv = 0, clrInt = 0, diagMode = 0;
+    unsigned noSecvid = 0, noHwcg = 0, noProt = 0, noIrq = 0, noEv = 0, clrInt = 0, diagMode = 0, trapPage = 0;
     PE_parse_boot_argn("kenzo-gpu-nosecvid", &noSecvid, sizeof(noSecvid));
     PE_parse_boot_argn("kenzo-gpu-nohwcg", &noHwcg, sizeof(noHwcg));
+    PE_parse_boot_argn("kenzo-gpu-noprot", &noProt, sizeof(noProt));
     PE_parse_boot_argn("kenzo-gpu-noirq", &noIrq, sizeof(noIrq));
     PE_parse_boot_argn("kenzo-gpu-noev", &noEv, sizeof(noEv));
     PE_parse_boot_argn("kenzo-gpu-clrint", &clrInt, sizeof(clrInt));
     PE_parse_boot_argn("kenzo-gpu-diag", &diagMode, sizeof(diagMode));
+    PE_parse_boot_argn("kenzo-gpu-trappage", &trapPage, sizeof(trapPage));
 
     A510HwInitConfig cfg = {};
     cfg.pm4_fw_iova = dmaPa + kPm4Off;
     cfg.pfp_fw_iova = dmaPa + kPfpOff;
-    cfg.uche_trap_iova = dmaPa + kTrapOff;
+    cfg.uche_trap_iova = (trapPage != 0U) ? (dmaPa + kTrapOff) : 0x0001FFFFFFFF0000ULL;
     cfg.clear_secvid_trust_cntl = (noSecvid == 0U);
     cfg.skip_hwcg = (noHwcg != 0U);
+    cfg.skip_cp_protect = (noProt != 0U);
 
     IOLog("KenzoGpuProbe: Gate3B starting a510_hw_init pa=0x%llx pm4=%u pfp=%u nohwcg=%u noirq=%u noev=%u\n",
           static_cast<unsigned long long>(dmaPa), pm4Len, pfpLen, noHwcg, noIrq, noEv);
@@ -568,7 +571,7 @@ extern "C" void kenzo_gpu_probe_run(void)
                 const IOOptionBits pOpts = static_cast<IOOptionBits>(kIODirectionInOut) |
                                            static_cast<IOOptionBits>(kIOMemoryPhysicallyContiguous);
                 IOBufferMemoryDescriptor *ptblDesc = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
-                    kernel_task, pOpts, static_cast<vm_size_t>(ptblSz), 0xFFFFF000ULL);
+                    kernel_task, pOpts, static_cast<vm_size_t>(ptblSz), 0xFFF00000ULL);
                 if (ptblDesc && ptblDesc->prepare() == kIOReturnSuccess) {
                     IOByteCount pLen = 0;
                     const uint64_t pPa = static_cast<uint64_t>(ptblDesc->getPhysicalSegment(0, &pLen, kIOMemoryMapperNone));
