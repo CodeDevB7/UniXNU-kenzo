@@ -392,8 +392,8 @@ private:
     uint8_t  t100MaxId = 0;
     uint8_t  t9MinId = 0;
     uint8_t  t9MaxId = 0;
-    uint16_t maxX = 1079U;
-    uint16_t maxY = 1919U;
+    uint16_t maxX = 1023U;
+    uint16_t maxY = 1023U;
     FingerSlot slots[kMaxSlots] = {};
 
     bool initTouchHardware();
@@ -507,6 +507,10 @@ bool KenzoInputController::initTouchHardware()
             qupI2cReadReg16(qup, qupClkCtl, kMxtI2cAddr, static_cast<uint16_t>(t100Addr + 24U), ybuf, 2)) {
             uint16_t xr = static_cast<uint16_t>(xbuf[0]) | (static_cast<uint16_t>(xbuf[1]) << 8);
             uint16_t yr = static_cast<uint16_t>(ybuf[0]) | (static_cast<uint16_t>(ybuf[1]) << 8);
+            // Per Atmel maXTouch T100 spec & live Kenzo Android getevent -p (0..1023 x 0..1023):
+            // XRANGE == 0 / YRANGE == 0 means hardware default 1023 (10-bit normalized coordinates).
+            if (xr == 0U) { xr = 1023U; }
+            if (yr == 0U) { yr = 1023U; }
             if (cfg1 & 0x20U) { // MXT_T100_CFG_SWITCHXY
                 const uint16_t tmp = xr;
                 xr = yr;
@@ -535,8 +539,8 @@ void KenzoInputController::publishTouches()
     __atomic_store_n(&native_touch_seq, seq + 1U, __ATOMIC_RELAXED);
     __asm__ volatile("dmb ishst" ::: "memory");
 
-    const uint32_t mx = maxX ? maxX : 1079U;
-    const uint32_t my = maxY ? maxY : 1919U;
+    const uint32_t mx = maxX ? maxX : 1023U;
+    const uint32_t my = maxY ? maxY : 1023U;
     uint32_t count = 0;
     for (unsigned s = 0; s < kMaxSlots; ++s) {
         if (!slots[s].active) {
@@ -546,12 +550,13 @@ void KenzoInputController::publishTouches()
         const uint32_t ry = slots[s].y > my ? my : slots[s].y;
         uint32_t sx = 0, sy = 0;
         if (touchRot == 90U) {
-            // Inverse of KenzoLegacyDisplay 90 deg CW landscape rotation (dx = physW-1-sy, dy = sx),
-            // with Kenzo BOE NT35532 maXTouch native Y-axis inversion (ry=0 at USB/right, ry=my at earpiece/left):
-            sx = ((my - ry) * kHidMaxX) / my;
+            // Exact inverse of KenzoLegacyDisplay 90 deg CW landscape rotation (dx = physW-1-sy, dy = sx):
+            // Portrait Atmel MXT336T outputs 0..1023 x 0..1023 (ry=0 earpiece/left -> ry=1023 USB/right;
+            // rx=1023 power/top -> rx=0 SIM/bottom).
+            sx = (ry * kHidMaxX) / my;
             sy = ((mx - rx) * kHidMaxY) / mx;
         } else if (touchRot == 270U) {
-            sx = (ry * kHidMaxX) / my;
+            sx = ((my - ry) * kHidMaxX) / my;
             sy = (rx * kHidMaxY) / mx;
         } else {
             sx = (rx * kHidMaxX) / mx;

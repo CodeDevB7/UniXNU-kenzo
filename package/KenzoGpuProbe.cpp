@@ -66,8 +66,9 @@ static inline void wr32(uintptr_t base, uint32_t off, uint32_t val)
 
 static bool enableGdsc(uintptr_t gcc, uint32_t off)
 {
-    wr32(gcc, off, rd32(gcc, off) & ~1U);
-    for (uint32_t i = 0; i < 500U; ++i) {
+    // Clear SW_COLLAPSE (BIT(0)) and HW_CONTROL (BIT(1)) so SW enable is not gated.
+    wr32(gcc, off, rd32(gcc, off) & ~3U);
+    for (uint32_t i = 0; i < 1000U; ++i) {
         if ((rd32(gcc, off) & (1U << 31)) != 0U) {
             return true;
         }
@@ -111,25 +112,34 @@ extern "C" void kenzo_gpu_probe_run(void)
         return;
     }
 
-    // Gate #1A: Inspect PM8004 S5 (vdd_gfx, PPID 0x520) via SPMI
+    // Gate #1A: Inspect/enable PM8004 S5 (vdd_gfx, PPID 0x520, QPNP FTS2.5) via SPMI
     kenzo_spmi::Channel gfxCh;
-    uint8_t id[2] = {}, ctl[2] = {}, en = 0;
+    uint8_t id[2] = {}, ctl[2] = {}, en = 0, sts1 = 0;
     uint32_t gfxMv = 0;
     const bool chOk = kenzo_spmi::openChannel(gfxCh, kPpidVddGfx, mode >= 2U);
     if (chOk && kenzo_spmi::readBytes(gfxCh, 0x04U, id, 2) &&
+        kenzo_spmi::readBytes(gfxCh, 0x08U, &sts1, 1) &&
         kenzo_spmi::readBytes(gfxCh, 0x40U, ctl, 2) &&
         kenzo_spmi::readBytes(gfxCh, 0x46U, &en, 1)) {
-        if (en & 0x80U) {
+        if ((en & 0x80U) && (sts1 & 0x80U)) {
             gfxMv = (ctl[0] == 0U) ? (80U + static_cast<uint32_t>(ctl[1]) * 5U)
                                    : (160U + static_cast<uint32_t>(ctl[1]) * 10U);
         } else if (mode >= 2U) {
-            // Request Nominal 965 mV (vset 0xB1, range 0) + enable
+            // Request Nominal 965 mV (range 0, vset 0xB1), PWM mode (0x80), enable (0x80), poll VREG_OK (0x08 BIT7)
             const uint8_t vcfg[2] = { 0x00U, 0xB1U };
+            const uint8_t pwm = 0x80U;
             const uint8_t on = 0x80U;
             if (kenzo_spmi::writeBytes(gfxCh, 0x40U, vcfg, 2) &&
+                kenzo_spmi::writeBytes(gfxCh, 0x45U, &pwm, 1) &&
                 kenzo_spmi::writeBytes(gfxCh, 0x46U, &on, 1)) {
-                IODelay(500);
-                if (kenzo_spmi::readBytes(gfxCh, 0x46U, &en, 1) && (en & 0x80U)) {
+                for (uint32_t s = 0; s < 50U; ++s) {
+                    IODelay(100);
+                    if (kenzo_spmi::readBytes(gfxCh, 0x08U, &sts1, 1) && (sts1 & 0x80U)) {
+                        break;
+                    }
+                }
+                (void)kenzo_spmi::readBytes(gfxCh, 0x46U, &en, 1);
+                if ((en & 0x80U) && (sts1 & 0x80U)) {
                     gfxMv = 965U;
                 }
             }
@@ -156,12 +166,12 @@ extern "C" void kenzo_gpu_probe_run(void)
     kenzo_gpu_probe_diag[1] = cxBefore;
     kenzo_gpu_probe_diag[2] = gxBefore;
 
-    IOLog("KenzoGpuProbe: Gate1 pre vdd_gfx=%u mV (en=0x%02x %02x/%02x) CX=0x%x GX=0x%x RCG=0x%x\n",
-          gfxMv, en, id[0], id[1], cxBefore, gxBefore, cfgBefore);
+    IOLog("KenzoGpuProbe: Gate1 pre vdd_gfx=%u mV (en=0x%02x sts1=0x%02x %02x/%02x) CX=0x%x GX=0x%x RCG=0x%x\n",
+          gfxMv, en, sts1, id[0], id[1], cxBefore, gxBefore, cfgBefore);
 
     if (gfxMv == 0U) {
         kenzo_gpu_probe_state = 1U;
-        IOLog("KenzoGpuProbe: vdd_gfx OFF (pass kenzo-gpu-probe=2 or RPM-SMD to enable)\n");
+        IOLog("KenzoGpuProbe: vdd_gfx OFF/VREG_OK=0 (sts1=0x%02x en=0x%02x)\n", sts1, en);
         gccMap->release(); gpuMap->release(); smmuMap->release();
         return;
     }
@@ -173,21 +183,35 @@ extern "C" void kenzo_gpu_probe_run(void)
         accMap->release();
     }
 
-    // Ensure GFX3D RCG is running on a valid source (XO 19.2 MHz if unconfigured)
-    if (cfgBefore == 0U) {
-        wr32(gcc, kGccGfx3dCmdRcgr, rd32(gcc, kGccGfx3dCmdRcgr) | 1U);
-        for (uint32_t i = 0; i < 1000U && (rd32(gcc, kGccGfx3dCmdRcgr) & 1U); ++i) { IODelay(1); }
-    }
-
-    if (!enableGdsc(gcc, kGccOxiliCxGdscr) || !enableGdsc(gcc, kGccOxiliGxGdscr)) {
+    // Step 1: Enable gdsc_oxili_cx (0x5904C) first, then its AHB/AON clocks
+    if (!enableGdsc(gcc, kGccOxiliCxGdscr)) {
         kenzo_gpu_probe_state = 2U;
-        IOLog("KenzoGpuProbe: GDSC timeout CX=0x%x GX=0x%x\n", rd32(gcc, kGccOxiliCxGdscr), rd32(gcc, kGccOxiliGxGdscr));
+        IOLog("KenzoGpuProbe: CX GDSC timeout CX=0x%x\n", rd32(gcc, kGccOxiliCxGdscr));
+        gccMap->release(); gpuMap->release(); smmuMap->release();
+        return;
+    }
+    (void)enableCbcr(gcc, kGccOxiliAhb);
+    (void)enableCbcr(gcc, kGccOxiliAon);
+
+    // Step 2: Kenzo DTB /soc/qcom,gdsc@185901c requires qcom,enable-root-clk (gfx3d_clk_src ROOT_EN)!
+    // Force GFX3D RCG onto safe XO 19.2 MHz (cfg=0), UPDATE (BIT0), and ROOT_EN (BIT1) before enabling GX GDSC.
+    wr32(gcc, kGccGfx3dCfgRcgr, 0U);
+    wr32(gcc, kGccGfx3dCmdRcgr, rd32(gcc, kGccGfx3dCmdRcgr) | 1U);
+    for (uint32_t i = 0; i < 1000U && (rd32(gcc, kGccGfx3dCmdRcgr) & 1U); ++i) { IODelay(1); }
+    wr32(gcc, kGccGfx3dCmdRcgr, rd32(gcc, kGccGfx3dCmdRcgr) | 2U); // ROOT_EN
+    for (uint32_t i = 0; i < 1000U && (rd32(gcc, kGccGfx3dCmdRcgr) & (1U << 31)); ++i) { IODelay(1); }
+
+    // Step 3: Enable gdsc_oxili_gx (0x5901C) and clear CLAMP_IO (0x5B00C)
+    if (!enableGdsc(gcc, kGccOxiliGxGdscr)) {
+        kenzo_gpu_probe_state = 3U;
+        IOLog("KenzoGpuProbe: GX GDSC timeout GX=0x%x CMD_RCGR=0x%x CLAMP=0x%x\n",
+              rd32(gcc, kGccOxiliGxGdscr), rd32(gcc, kGccGfx3dCmdRcgr), rd32(gcc, kGccOxiliGxClamp));
         gccMap->release(); gpuMap->release(); smmuMap->release();
         return;
     }
     wr32(gcc, kGccOxiliGxClamp, rd32(gcc, kGccOxiliGxClamp) & ~1U);
 
-    // Vote SMMU clocks + enable 6 Oxili branch clocks (AHB first!)
+    // Step 4: Vote SMMU clocks + enable remaining Oxili branch clocks
     wr32(gcc, kGccApcsVote2, rd32(gcc, kGccApcsVote2) | kSmmuVoteBits);
     const uint32_t smmuHalts[4] = { 0x12020U, 0x12010U, 0x12044U, 0x12098U };
     for (unsigned i = 0; i < 4U; ++i) {
@@ -198,7 +222,7 @@ extern "C" void kenzo_gpu_probe_run(void)
     };
     for (unsigned i = 0; i < 6U; ++i) {
         if (!enableCbcr(gcc, clks[i])) {
-            kenzo_gpu_probe_state = 3U;
+            kenzo_gpu_probe_state = 4U;
             IOLog("KenzoGpuProbe: Oxili CBCR 0x%x halt timeout\n", clks[i]);
             gccMap->release(); gpuMap->release(); smmuMap->release();
             return;
